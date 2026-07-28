@@ -425,6 +425,9 @@ api/
 │   ├── models.py        SQLAlchemy 2.0 tables (§8)
 │   ├── schemas.py       Pydantic request/response types
 │   ├── result.py        the Result envelope: ok / error / message
+│   ├── catalog_data.py  the §3.1 catalog and §3.4 size deltas, as data
+│   ├── seed.py          idempotent catalog seed (not in alembic/ — the installed
+│   │                    alembic package owns that import name)
 │   ├── daily_menu.py    draws today's menu and asserts G1–G4 (§3.2)
 │   └── service.py       every business operation, as plain async functions
 │
@@ -436,7 +439,7 @@ api/
 │   ├── graph.py         build_graph() — nodes and edges, and nothing else
 │   └── summarize.py     background visit summarization (§6.5.1)
 │
-├── alembic/             migrations + seed_menu.py
+├── alembic/             migrations only
 └── tests/
 ```
 

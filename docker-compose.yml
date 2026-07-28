@@ -5,6 +5,13 @@
 # to start and serve with no collector reachable.
 
 services:
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
   db:
     image: postgres:16
     environment:

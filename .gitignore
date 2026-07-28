@@ -18,3 +18,6 @@ dist/
 # Local config
 .env
 .env.local
+
+# Frontend build
+web/dist/

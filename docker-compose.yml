@@ -1,8 +1,18 @@
 # Local development stack (spec §10).
 #
-# Services arrive as the milestones need them; `llm` and `otel` land in M2/M3.
+# THE MODEL IS NOT STARTED BY DEFAULT. `docker compose up` gives you web, api,
+# db and otel, and expects Ollama on the host at :11434. That is the fast path
+# on Apple Silicon, where Docker has no GPU passthrough.
+#
+# For a fully self-contained stack (Linux, CI, or a machine with no Ollama):
+#
+#     make up-with-llm            # or:
+#     OLLAMA_BASE_URL=http://llm:11434/v1 docker compose --profile llm up -d
+#
 # `api` must never depend on `otel` — telemetry is best-effort and the app has
-# to start and serve with no collector reachable.
+# to start and serve with no collector reachable. It does not depend on `llm`
+# either: a missing model degrades one endpoint, it does not stop the shop
+# opening.
 
 services:
   web:
@@ -68,6 +78,47 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
 
+  # Opt-in: `docker compose --profile llm up`.
+  #
+  # Left out of the default stack on purpose. Docker Desktop on Apple Silicon
+  # has no GPU passthrough, so this runs CPU-only and is roughly an order of
+  # magnitude slower than `ollama serve` on the host — slow enough to make
+  # prompt iteration miserable. Use the host there; use this profile on Linux,
+  # in CI, or when you want one command to bring up everything.
+  #
+  # The first start downloads several GB. Weights live in a named volume so it
+  # happens once.
+  llm:
+    profiles: ["llm"]
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - llm_models:/root/.ollama
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+    # The image's entrypoint is `ollama serve`, which has no way to pull a model
+    # first. Serve in the background, wait for the API, pull, then hand the
+    # foreground back to the server.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        echo "pulling $${OLLAMA_MODEL} (first run downloads several GB)..."
+        ollama pull "$${OLLAMA_MODEL}"
+        wait
+    healthcheck:
+      # Checks the configured model is actually present, not merely that the
+      # server answers — otherwise this reports healthy mid-download and the
+      # first conversation fails with a confusing 404.
+      test: ["CMD-SHELL", "ollama list | grep -q \"$${OLLAMA_MODEL%%:*}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 600s
+
 volumes:
   db_data:
   otel_data:
+  llm_models:

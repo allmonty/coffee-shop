@@ -4,16 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-**This repo contains a specification and no implementation.** The only tracked files are
-`coffee-shop.md` and `.gitignore`. There is no build, no test suite, no dependency manifest, and no
-application code yet.
+Implemented and working end to end. `coffee-shop.md` (~1100 lines) remains the source of truth for
+*why* — most decisions in it are load-bearing and were made against a plausible alternative, with the
+reasoning recorded inline. Read the relevant section before changing behaviour.
 
-Do not infer commands from this file that you have not verified exist. Anything under "Planned
-toolchain" below is what the spec *calls for*, not what is installed.
+## Commands
 
-`coffee-shop.md` (~1100 lines) is the source of truth. Read the relevant section before implementing
-anything — most design decisions in it are load-bearing and were made deliberately against a plausible
-alternative, and the reasoning is recorded inline.
+```bash
+make test          # 158 tests, needs only Postgres — no Ollama
+make lint          # ruff check + format --check
+make up            # full stack: app :3000, api :8000, Grafana :3001
+
+cd api
+uv run pytest tests/test_graph.py -q          # one file
+uv run pytest -m scenario                     # 6 conversations with the real model
+uv run python scripts/check_tool_calling.py   # does the model tool-call at all?
+uv run python scripts/shop_cli.py --name Allan
+uv run alembic revision --autogenerate -m "..." && uv run alembic upgrade head
+```
+
+`make test` starts only the `db` container. Tests run against real Postgres in a `coffee_shop_test`
+database, migrated with alembic, each test in a rolled-back transaction.
+
+**Debugging order when the barista misbehaves:** run `check_tool_calling.py` first, then look at the
+trace in Grafana, then suspect the code. Most failures are the model or the prompt.
 
 ## What is being built
 
@@ -40,13 +54,15 @@ interesting complexity stays in the agent layer. Weigh design choices accordingl
 | §11 | Milestone plan, M1–M7 |
 | §13 | Decisions already made, with reasoning, plus what is still open |
 
-## Planned toolchain (not yet present)
+## Testing approach
 
-Per the spec: Python 3.12 + FastAPI + LangGraph, `uv` for dependencies, SQLAlchemy 2.0 + Alembic,
-pytest, React + Vite, and a five-service `docker compose` (`web`, `api`, `db`, `llm` via Ollama, `otel`
-via `grafana/otel-lgtm`). App on :3000, API on :8000, Grafana on :3001.
+The default suite uses `tests/fakes.py::FakeToolCallingModel`, which replays a script of `AIMessage`s
+with and without tool calls. That is what keeps graph tests fast, deterministic and CI-safe. Use
+`tool_calls(...)` (plural) when you need several calls in ONE assistant turn — that shape is what
+exposed the concurrent-tools bug, and no single-call test would have caught it.
 
-When creating these, follow §5.3's layout — it exists so the code stays readable while learning.
+Scenario tests (`-m scenario`) drive the real model and are flaky by nature. They assert on final
+domain state, never on wording.
 
 ## Invariants that must survive implementation
 
@@ -75,11 +91,13 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
 - **Telemetry is best-effort.** `api` must not `depends_on: otel`; a failed exporter must never fail a
   request. Metrics are for what only the runtime knows — order counts and revenue come from SQL, not
   from counters.
-
-## Known cleanup
-
-`.gitignore` is still the Elixir one from the original plan (`/_build`, `/deps`, `*.beam`,
-`.elixir_ls/`). The backend is Python now; it needs Python and Node entries when implementation starts.
+- **Tool calls run sequentially** (`agent/graph.py::run_tools`). LangGraph's prebuilt `ToolNode` runs
+  them concurrently, which breaks both the shared `AsyncSession` and the causal order of
+  "add it, then charge me". Do not swap it back.
+- **A malformed tool call returns an envelope, never raises.** Small models drop required arguments
+  constantly; the barista has to be able to fix and retry.
+- **A failed tool marks its own span, not the parent turn.** "insufficient funds" is a normal outcome,
+  and marking it a request error makes every dashboard lie.
 
 ## Working style for this repo
 

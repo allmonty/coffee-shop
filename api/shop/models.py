@@ -176,10 +176,17 @@ class CartLine(Base):
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        # Idempotency key. A model that emits place_order twice for the same
+        # cart charges once: the second insert conflicts and we return the
+        # original order (spec §6.4).
+        UniqueConstraint("visit_id", "cart_version", name="uq_orders_visit_cart_version"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     visit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("visits.id", ondelete="CASCADE"))
+    cart_version: Mapped[int] = mapped_column(Integer)
     day: Mapped[int] = mapped_column(Integer)
     total_cents: Mapped[int] = mapped_column(Integer)
     placed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

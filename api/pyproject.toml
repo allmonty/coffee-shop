@@ -10,6 +10,10 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.36,<2.1",
     "asyncpg>=0.30,<0.31",
     "alembic>=1.14,<1.15",
+    "opentelemetry-sdk>=1.29,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.29,<2.0",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.50b0",
 ]
 
 [dependency-groups]

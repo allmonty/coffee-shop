@@ -24,7 +24,10 @@ from shop.models import MenuItem, User, VisitMenuItem
 from shop.seed import seed_catalog
 from shop.service import enter, get_cart
 
-pytestmark = pytest.mark.scenario
+# The 30s default exists to catch deadlocks in the fast suite. These drive a
+# real model through several turns; a 14B on consumer hardware needs minutes,
+# and a timeout here would look like a model failure when it is only slowness.
+pytestmark = [pytest.mark.scenario, pytest.mark.timeout(600)]
 
 PINNED = ["Latte", "Filter Coffee", "Chocolate Chip Cookie", "Croissant"]
 

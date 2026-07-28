@@ -494,9 +494,19 @@ rules) → `tools.py` (how the model is allowed to touch it) → `prompts.py` (w
 
 Tool calling is mandatory, which rules out most small models. Candidates, in order of preference:
 
-1. `qwen2.5:7b-instruct` — reliable tool calling, runs on 16 GB RAM.
-2. `llama3.1:8b` — good tool calling, widely documented.
-3. `qwen2.5:14b-instruct` — noticeably better at multi-turn recovery if the hardware allows.
+Measured against `scripts/check_tool_calling.py` and the scenario suite (§12), on an M4:
+
+1. **`qwen2.5:14b-instruct`** (~9 GB) — the default. All six scenarios pass. Follows the prompt's
+   rules most reliably: asks which size instead of inventing one, and does not drift after a tool
+   error.
+2. `qwen2.5:7b-instruct` (~4.7 GB) — roughly twice as fast and also passes all six, but needed three
+   prompt fixes to get there (a dedicated SIZES section with worked examples, an explicit "act first,
+   then talk", and tolerance for malformed calls). Those fixes stayed, and they help the 14B too.
+3. `qwen2.5:3b` (~1.9 GB) — passes the raw tool-calling check but ignores prompt rules often enough
+   to be frustrating. Useful when iterating on graph code rather than on behaviour.
+
+Tool calling is the hard requirement, which rules out most small models. Whatever you pick, run
+`check_tool_calling.py` against it before assuming a misbehaving barista is your code's fault.
 
 Configured via `OLLAMA_MODEL` so it can be swapped without code changes. The agent layer talks to
 Ollama through its OpenAI-compatible API (`langchain-openai` pointed at the Ollama base URL), which

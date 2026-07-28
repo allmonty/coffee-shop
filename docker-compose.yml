@@ -46,7 +46,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b-instruct}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -96,7 +96,7 @@ services:
     volumes:
       - llm_models:/root/.ollama
     environment:
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b-instruct}
     # The image's entrypoint is `ollama serve`, which has no way to pull a model
     # first. Serve in the background, wait for the API, pull, then hand the
     # foreground back to the server.

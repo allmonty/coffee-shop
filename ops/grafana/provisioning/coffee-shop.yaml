@@ -1,0 +1,20 @@
+# Grafana dashboard provider (spec §9.7).
+#
+# `provisioning/dashboards/` is scanned for *provider YAML*, not for dashboard
+# JSON — dropping a .json file in there does nothing, silently. This file is the
+# missing half: it points Grafana at the directory the JSON is mounted into.
+apiVersion: 1
+
+providers:
+  - name: "coffee-shop"
+    orgId: 1
+    folder: "Coffee Shop"
+    type: file
+    disableDeletion: false
+    # The dashboard lives in git, so the UI must not be the source of truth for
+    # it — an edit saved in Grafana is reverted on the next scan, which is the
+    # behaviour we want from a provisioned dashboard.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/coffee-shop
+      foldersFromFilesStructure: false

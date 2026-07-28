@@ -983,6 +983,25 @@ The Python **logs** SDK is the least mature of the three signals — if the brid
 is structured JSON to stdout picked up by the collector's `filelog` receiver, with `trace_id` injected
 manually. Don't spend a whole evening on it; traces are carrying the real weight.
 
+**One trace per turn, not per visit.** The obvious-looking alternative — hold one trace open for the
+whole in-game day so every turn shares a `trace_id` — is wrong, and the reasons are worth writing down
+because the idea keeps coming back:
+
+- A span is only exported when it **ends**. A day-long root span shows you nothing until the customer
+  goes home, which is precisely when you are not debugging.
+- Unended spans sit in the `BatchSpanProcessor` and are lost on restart. One `docker compose restart api`
+  would take the whole day's telemetry with it.
+- The context would have to survive across HTTP requests — each `/api/chat` POST is its own request — so
+  the `traceparent` would need persisting in the checkpointer and re-injecting every turn.
+- `agent.turn` duration would become "how long the customer sat in the shop" and the latency panel in
+  §9.7 would stop meaning anything.
+
+Visit-scoped correlation is done with **attributes instead**: `visit_id`, `user_id` and `day` are stamped
+onto every span (by a `SpanProcessor.on_start` hook, so auto-instrumented SQL spans get them too) and
+onto every log record (by a `logging.Filter`), both reading one `ContextVar` set in `turn_span`. That
+gives `{ .visit_id = "…" }` in Tempo and `| visit_id="…"` in Loki — the whole day in one query — while
+each turn stays a bounded, individually readable trace.
+
 ### 9.6 Configuration
 
 Standard environment variables, no bespoke config:
@@ -1008,6 +1027,15 @@ lives in git. Panels: turn latency p50/p95 · loop iterations histogram · tool 
 rate by tool · tokens in/out per turn · malformed tool calls · guard rejections · a live error log
 stream. Add the Postgres datasource too, and drive the shop-business panels (orders, revenue, items
 sold by in-game day) from SQL against the real tables rather than from counters (§9.4).
+
+Two provisioning details that fail *silently*, both of which cost an evening once:
+
+- Grafana scans `provisioning/dashboards/` for **provider YAML**, not for dashboard JSON. The JSON needs
+  a separate mount plus `ops/grafana/provisioning/coffee-shop.yaml` pointing at it. JSON dropped straight
+  into the provisioning directory is ignored without a log line.
+- `grafana/otel-lgtm` marks **no datasource as default**, so every panel and every target must name its
+  datasource `uid` explicitly. A panel that omits it renders empty and looks like missing data rather
+  than like a broken dashboard.
 
 Optional stretch: browser-side tracing from React, with the trace context propagated into `/api/chat`,
 so a single trace spans click → agent → model → response. It needs CORS on the collector's OTLP endpoint

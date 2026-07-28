@@ -12,6 +12,7 @@ next to what it does (prompts.py, tools.py, shop/).
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from typing import Any
 
@@ -23,6 +24,7 @@ from agent.instrumentation import (
     loop_iterations,
     node_span,
     record_llm_call,
+    record_tool_call,
     record_tool_result,
     tool_malformed,
     tool_span,
@@ -85,8 +87,9 @@ def make_barista(llm):
             # The system message is rebuilt every turn from live state, so the
             # menu, wallet and cart the model sees are never stale.
             messages = [SystemMessage(content=system_prompt(dict(state))), *state["messages"]]
+            started = time.monotonic()
             reply = await model.ainvoke(messages, config)
-            record_llm_call(span, reply)
+            record_llm_call(span, reply, (time.monotonic() - started) * 1000)
             # Count laps here, record the total at finish. Recording 1 per
             # lap would make the histogram meaningless — what matters is how
             # many laps ONE turn took.
@@ -133,43 +136,46 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
     last = state["messages"][-1]
     results: list[ToolMessage] = []
 
-    for call in last.tool_calls:
-        tool = TOOLS_BY_NAME.get(call["name"])
-        if tool is None:
+    with node_span("tools"):
+        for call in last.tool_calls:
+            tool = TOOLS_BY_NAME.get(call["name"])
+            if tool is None:
+                results.append(
+                    ToolMessage(
+                        content=json.dumps({"ok": False, "error": "unknown_tool"}),
+                        tool_call_id=call["id"],
+                        name=call["name"],
+                    )
+                )
+                continue
+
+            with tool_span(call["name"]) as span:
+                record_tool_call(call["name"], call["args"])
+                try:
+                    payload = await tool.ainvoke({**call["args"]}, config)
+                except Exception as error:
+                    # A malformed tool call must never crash the turn. Small
+                    # models drop required arguments constantly; handing the
+                    # problem back as an ordinary envelope lets the barista fix
+                    # it and retry, which is what it does with any tool error.
+                    payload = {
+                        "ok": False,
+                        "error": "invalid_arguments",
+                        "message": (
+                            f"That call to {call['name']} was missing something: {error}. "
+                            "Check the arguments and try again."
+                        ),
+                    }
+                    tool_malformed.add(1, {"reason": "invalid_arguments"})
+                record_tool_result(span, call["name"], payload)
+
             results.append(
                 ToolMessage(
-                    content=json.dumps({"ok": False, "error": "unknown_tool"}),
+                    content=json.dumps(payload),
                     tool_call_id=call["id"],
                     name=call["name"],
                 )
             )
-            continue
-
-        with tool_span(call["name"]) as span:
-            try:
-                payload = await tool.ainvoke({**call["args"]}, config)
-            except Exception as error:
-                # A malformed tool call must never crash the turn. Small models
-                # drop required arguments constantly; handing the problem back
-                # as an ordinary envelope lets the barista fix it and retry,
-                # which is exactly what it does with any other tool error.
-                payload = {
-                    "ok": False,
-                    "error": "invalid_arguments",
-                    "message": (
-                        f"That call to {call['name']} was missing something: {error}. "
-                        "Check the arguments and try again."
-                    ),
-                }
-                tool_malformed.add(1, {"reason": "invalid_arguments"})
-            record_tool_result(span, call["name"], payload)
-        results.append(
-            ToolMessage(
-                content=json.dumps(payload),
-                tool_call_id=call["id"],
-                name=call["name"],
-            )
-        )
 
     return {"messages": results}
 

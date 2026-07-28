@@ -23,14 +23,22 @@ Two conventions worth keeping:
 
 from __future__ import annotations
 
+import json
+import logging
+import time
 from contextlib import contextmanager
 
 from opentelemetry.trace import Status, StatusCode
 
-from telemetry import get_meter, get_tracer
+from telemetry import correlation_scope, get_meter, get_tracer
 
 tracer = get_tracer("coffee-shop.agent")
 _meter = get_meter("coffee-shop.agent")
+
+# Structured events, not prose (spec §9.5). Every record emitted from inside a
+# span carries that span's trace_id, which is the whole point: the log panel in
+# Grafana is a way *into* a trace, not a separate story about the same turn.
+logger = logging.getLogger("coffee_shop.agent")
 
 turn_duration = _meter.create_histogram(
     "agent.turn.duration", unit="ms", description="End-to-end latency of one turn."
@@ -64,16 +72,40 @@ llm_duration = _meter.create_histogram("llm.request.duration", unit="ms")
 
 
 @contextmanager
-def turn_span(visit_id: str, user_id: str):
-    with tracer.start_as_current_span("agent.turn") as span:
-        span.set_attribute("visit_id", visit_id)
-        span.set_attribute("user_id", user_id)
-        yield span
+def turn_span(visit_id: str, user_id: str, day: int | None = None):
+    """The root span of a turn. Every node and tool span hangs off this one.
+
+    It has to be entered where the graph actually runs — inside the streaming
+    generator — and not in the request handler. FastAPI's request span is closed
+    before the first token is produced, so a turn parented there would be
+    orphaned anyway.
+
+    The correlation scope wraps the span rather than the other way round, so the
+    root span itself is tagged by `on_start` like every other span. One visit is
+    one in-game day, which is what makes `visit_id` the key for "the whole day"
+    without any turn having to know about the turns around it.
+    """
+    started = time.monotonic()
+    with (
+        correlation_scope(visit_id=visit_id, user_id=user_id, day=day),
+        tracer.start_as_current_span("agent.turn") as span,
+    ):
+        logger.info("turn.start")
+        try:
+            yield span
+        finally:
+            # In `finally` so an abandoned turn — the customer closing the tab
+            # mid-stream — is still measured. Dropping those would quietly bias
+            # the latency panel towards the turns that went well.
+            elapsed = (time.monotonic() - started) * 1000
+            turn_duration.record(elapsed)
+            logger.info("turn.end", extra={"duration_ms": round(elapsed)})
 
 
 @contextmanager
 def node_span(name: str):
     with tracer.start_as_current_span(f"graph.node.{name}") as span:
+        logger.info("graph.node", extra={"node": name})
         yield span
 
 
@@ -83,6 +115,16 @@ def tool_span(name: str):
     with tracer.start_as_current_span(f"tool.{name}") as span:
         span.set_attribute("tool.name", name)
         yield span
+
+
+def record_tool_call(name: str, args: dict) -> None:
+    """Log the invocation before it runs, so a tool that hangs still leaves a trail.
+
+    Note `tool_args`, not `args`: `extra` keys collide with the reserved
+    attributes on `logging.LogRecord`, and `args` is one of them — logging
+    raises rather than shadowing it.
+    """
+    logger.info("tool.call", extra={"tool": name, "tool_args": _short(args)})
 
 
 def record_tool_result(span, name: str, payload: dict) -> None:
@@ -96,6 +138,15 @@ def record_tool_result(span, name: str, payload: dict) -> None:
         # "insufficient funds" does not read as a broken request.
         span.set_status(Status(StatusCode.ERROR, error))
 
+    # A rejected order is an ordinary outcome, so it logs at WARNING, not ERROR —
+    # same reasoning as the span status above. Dashboards that treat
+    # "insufficient funds" as a fault lie about the health of the service.
+    logger.log(
+        logging.WARNING if error else logging.INFO,
+        "tool.result",
+        extra={"tool": name, "ok": ok, "error": error or "", "envelope": _short(payload)},
+    )
+
     tool_calls.add(1, {"tool": name, "ok": str(ok).lower()})
 
     if error in {"unknown_item", "not_available_today"}:
@@ -106,7 +157,7 @@ def record_tool_result(span, name: str, payload: dict) -> None:
         size_clarifications.add(1)
 
 
-def record_llm_call(span, response) -> None:
+def record_llm_call(span, response, duration_ms: float | None = None) -> None:
     """OTel GenAI semantic conventions (spec §9.3).
 
     Still marked experimental upstream and they do shift between releases; pin
@@ -116,6 +167,10 @@ def record_llm_call(span, response) -> None:
     usage = getattr(response, "usage_metadata", None) or {}
     span.set_attribute("gen_ai.system", "ollama")
     span.set_attribute("gen_ai.operation.name", "chat")
+
+    if duration_ms is not None:
+        llm_duration.record(duration_ms)
+        span.set_attribute("gen_ai.request.duration_ms", round(duration_ms))
 
     if usage:
         span.set_attribute("gen_ai.usage.input_tokens", usage.get("input_tokens", 0))
@@ -130,3 +185,27 @@ def record_llm_call(span, response) -> None:
     if invalid:
         tool_malformed.add(len(invalid), {"reason": "unparseable"})
         span.set_attribute("gen_ai.response.invalid_tool_calls", len(invalid))
+        logger.warning("llm.invalid_tool_calls", extra={"count": len(invalid)})
+
+    logger.info(
+        "llm.response",
+        extra={
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "tool_calls": len(calls),
+            "duration_ms": round(duration_ms) if duration_ms is not None else 0,
+        },
+    )
+
+
+def _short(value, limit: int = 800) -> str:
+    """Log payloads as JSON, truncated.
+
+    `message` fields are barista prose and can run long; an unbounded log line
+    is how a log volume fills up overnight.
+    """
+    try:
+        text = json.dumps(value, default=str)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"

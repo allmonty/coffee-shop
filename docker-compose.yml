@@ -73,7 +73,12 @@ services:
       - "4318:4318"   # OTLP HTTP
     volumes:
       - otel_data:/data
-      - ./ops/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/coffee-shop:ro
+      # Two mounts, and both are needed: Grafana scans the provisioning
+      # directory for provider YAML only, and the provider then points at where
+      # the dashboard JSON actually lives. Mounting the JSON into the
+      # provisioning directory looks right and loads nothing.
+      - ./ops/grafana/provisioning/coffee-shop.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/coffee-shop.yaml:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards/coffee-shop:ro
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin

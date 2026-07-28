@@ -80,6 +80,9 @@ async def chat(body: ChatRequest):
                     visit_id=visit_id,
                     message=body.message,
                     event=body.event,
+                    # Already loaded above, so tagging the turn with the in-game
+                    # day costs no extra query.
+                    day=visit.day,
                 ):
                     yield sse(frame)
             except Exception as error:  # pragma: no cover - surfaced to the UI

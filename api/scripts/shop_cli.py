@@ -58,7 +58,8 @@ async def converse(name: str) -> None:
         async with open_checkpointer() as checkpointer:
             graph = build_graph(checkpointer=checkpointer)
 
-            await turn(session, graph, user_id, visit_id, event="on_enter")
+            day = data["day"]
+            await turn(session, graph, user_id, visit_id, day=day, event="on_enter")
 
             while True:
                 try:
@@ -85,7 +86,7 @@ async def converse(name: str) -> None:
                     print(f"{DIM}{len(snapshot.values.get('messages', []))} messages{RESET}\n")
                     continue
 
-                ended = await turn(session, graph, user_id, visit_id, message=text)
+                ended = await turn(session, graph, user_id, visit_id, day=day, message=text)
                 if ended:
                     print(f"{DIM}— next morning —{RESET}\n")
                     break

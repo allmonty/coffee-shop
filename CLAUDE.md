@@ -12,7 +12,7 @@ reasoning recorded inline. Read the relevant section before changing behaviour.
 ## Commands
 
 ```bash
-make test          # 158 tests, needs only Postgres — no Ollama
+make test          # 172 tests, needs only Postgres — no Ollama
 make lint          # ruff check + format --check
 make up            # full stack: app :3000, api :8000, Grafana :3001
 

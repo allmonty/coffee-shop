@@ -16,6 +16,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
+from agent.instrumentation import turn_span
 from agent.summarize import summarize_visit
 
 GREETING_PROMPTS = {
@@ -35,6 +36,7 @@ async def run_turn(
     visit_id: uuid.UUID,
     message: str | None = None,
     event: str | None = None,
+    day: int | None = None,
     summary_llm=None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield `{type, ...}` frames for one turn."""
@@ -53,23 +55,30 @@ async def run_turn(
     }
 
     final_state: dict[str, Any] = {}
-    async for kind, payload in graph.astream(
-        {"messages": [HumanMessage(content=text)]},
-        config=config,
-        stream_mode=["messages", "values"],
-    ):
-        if kind == "messages":
-            chunk, _metadata = payload
-            # Only the barista's own words. `stream_mode="messages"` also emits
-            # ToolMessage chunks, and forwarding those printed raw envelope JSON
-            # into the conversation.
-            if isinstance(chunk, AIMessageChunk | AIMessage) and chunk.content:
-                yield {"type": "token", "text": chunk.content}
 
-        elif kind == "values":
-            final_state = payload
-            async for frame in _domain_frames(payload):
-                yield frame
+    # The turn's root span opens here rather than in the router, because this is
+    # where the graph actually runs. The FastAPI request span is already closed
+    # by the time starlette starts draining this generator, so node spans opened
+    # under it would each become their own root trace — which is exactly what
+    # they did before this wrapper existed.
+    with turn_span(str(visit_id), str(user_id), day):
+        async for kind, payload in graph.astream(
+            {"messages": [HumanMessage(content=text)]},
+            config=config,
+            stream_mode=["messages", "values"],
+        ):
+            if kind == "messages":
+                chunk, _metadata = payload
+                # Only the barista's own words. `stream_mode="messages"` also
+                # emits ToolMessage chunks, and forwarding those printed raw
+                # envelope JSON into the conversation.
+                if isinstance(chunk, AIMessageChunk | AIMessage) and chunk.content:
+                    yield {"type": "token", "text": chunk.content}
+
+            elif kind == "values":
+                final_state = payload
+                async for frame in _domain_frames(payload):
+                    yield frame
 
     ended = bool(final_state.get("visit_ended"))
     yield {"type": "done", "visit_ended": ended}

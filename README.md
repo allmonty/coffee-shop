@@ -78,7 +78,7 @@ uv run python scripts/check_tool_calling.py
 ## Tests
 
 ```bash
-make test                                     # 158 tests, no Ollama needed
+make test                                     # 172 tests, no Ollama needed
 cd api && uv run pytest -m scenario           # 6 conversations with the real model
 ```
 

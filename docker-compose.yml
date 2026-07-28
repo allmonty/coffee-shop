@@ -63,6 +63,7 @@ services:
       - "4318:4318"   # OTLP HTTP
     volumes:
       - otel_data:/data
+      - ./ops/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/coffee-shop:ro
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin

@@ -64,11 +64,16 @@ async def get_cart(config: RunnableConfig) -> dict:
 @tool
 async def add_to_cart(
     item_name: str,
-    quantity: int,
     config: RunnableConfig,
+    quantity: int = 1,
     size: str | None = None,
 ) -> dict:
-    """Add an item from today's menu. Drinks need a size; food must not have one."""
+    """Add an item from today's menu to the order.
+
+    size: REQUIRED for drinks, and it must be what the customer actually said —
+    ask them if they did not say one. Omit this argument entirely for food;
+    passing it for a cookie or pastry is an error.
+    """
     session, visit_id = _context(config)
     return (await service.add_to_cart(session, visit_id, item_name, quantity, size)).to_dict()
 

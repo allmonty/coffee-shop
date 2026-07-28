@@ -25,7 +25,13 @@ services:
     build: ./api
     environment:
       DATABASE_URL: postgresql+asyncpg://coffee:coffee@db:5432/coffee_shop
-      OTEL_ENABLED: "false"
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:
@@ -37,5 +43,23 @@ services:
       timeout: 3s
       retries: 10
 
+  # Traces, metrics and logs in one container: OTel Collector + Tempo +
+  # Prometheus + Loki + Grafana, all pre-wired (spec §9.1).
+  #
+  # Grafana is on 3001 because the frontend takes 3000. Nothing depends on this
+  # service — telemetry is best-effort and the shop opens without it.
+  otel:
+    image: grafana/otel-lgtm
+    ports:
+      - "3001:3000"   # Grafana
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - otel_data:/data
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+
 volumes:
   db_data:
+  otel_data:

@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from alembic import command
 from alembic.config import Config
@@ -69,6 +69,30 @@ def prepared_database() -> None:
     """Sync fixture so it owns its own loop and leaks nothing into the tests."""
     asyncio.run(_create_database_and_schema())
     _migrate(test_database_url())
+
+
+ALL_TABLES = (
+    "users, menu_items, size_modifiers, visits, visit_menu_items, carts, "
+    "cart_lines, orders, order_lines, messages, customer_preferences"
+)
+
+
+@pytest_asyncio.fixture
+async def session_factory(prepared_database):
+    """Real committing sessions, for tests that need genuine concurrency.
+
+    The rollback `session` fixture cannot express "two transactions racing",
+    because both would be inside the same outer transaction. Tests using this
+    commit for real, so the fixture truncates afterwards.
+    """
+    engine = create_async_engine(test_database_url())
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text(f"TRUNCATE {ALL_TABLES} RESTART IDENTITY CASCADE"))
+        await engine.dispose()
 
 
 @pytest_asyncio.fixture

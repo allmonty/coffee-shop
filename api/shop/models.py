@@ -16,11 +16,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -91,6 +93,17 @@ class SizeModifier(Base):
 
 class Visit(Base):
     __tablename__ = "visits"
+    __table_args__ = (
+        # At most one open visit per customer. Two tabs entering at once would
+        # otherwise each open a visit, which means two wallets for the same day
+        # and a stranded checkpointed conversation (spec §7.1).
+        Index(
+            "uq_visits_one_open_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))

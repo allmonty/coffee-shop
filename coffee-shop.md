@@ -781,7 +781,9 @@ upstream message is a plain POST, and SSE reconnects on its own. A WebSocket wou
 In-process Python calls, not HTTP. `agent/tools.py` defines one `@tool` per entry in §6.4; each is a
 thin wrapper that calls the matching `shop.service` function and returns its `{ok, ...}` envelope
 verbatim as the tool message. The wrappers hold no logic of their own beyond argument coercion — any
-rule that lives in a wrapper is a rule the button-based UI (§11, M2) would not enforce.
+rule that lives in a wrapper is a rule the REST API (§7.1) and the button-based UI (§11, M7) would not
+enforce, which means the same order placed by clicking would behave differently from one placed by
+talking.
 
 A debug endpoint, `POST /api/debug/tool`, invokes any tool directly with hand-written arguments. It is
 the fastest way to tell a broken tool apart from a model that is calling it wrong.
@@ -1034,43 +1036,48 @@ Notes:
 
 ## 11. Milestones
 
-Each milestone is independently demoable.
+Each milestone is independently demoable. The **frontend deliberately comes late** — see the note at the
+end of this section.
 
 **M1 — Domain skeleton.** FastAPI + SQLAlchemy + Alembic + Postgres. `shop/service.py` complete: catalog
 seeding, daily menu generation with its G1–G4 guarantees (§3.2), sizes and size pricing (§3.4), users,
-visits, wallet, cart, orders, day advance. Exercised through pytest and the REST endpoints; no
-UI, no agent, no LangGraph in the dependency list yet. Getting the rules right before the
-non-deterministic layer sits on top is what makes the rest debuggable.
+visits, wallet, cart, orders, day advance. Exercised through pytest; no UI, no agent, no LangGraph in the
+dependency list yet. Getting the rules right before the non-deterministic layer sits on top is what makes
+the rest debuggable.
 
-Bring up `otel` here too and switch on auto-instrumentation — it costs an afternoon, and from this point
-on every later milestone is debuggable by looking at a trace instead of guessing.
+**M2 — REST API + telemetry baseline.** The §7.1 endpoints, and `otel` with auto-instrumentation. The app
+is exercisable end to end with `curl`. Telemetry lands before the agent on purpose: it costs an afternoon,
+and from here on every later milestone is debuggable by looking at a trace instead of guessing.
 
-**M2 — Static UI.** React storefront with the name input, entering the shop, cart and wallet panels,
-ordering via buttons instead of conversation — including a small/medium/large selector on drinks and none
-on food. The app is fully playable without an LLM — and this stays permanently as the fallback for
-telling a domain bug apart from an agent bug.
+**M3 — First agent loop.** First prove the model can tool-call *without* LangGraph — a raw
+OpenAI-compatible call with one tool schema. Only then `agent/graph.py`: a single node, then a `ToolNode`
+and the conditional edge, then the full tool set. The goal is one successful tool call end to end. Expect
+the time to go on model choice and prompt phrasing, not on graph code.
 
-**M3 — First agent loop.** `agent/graph.py` with LangGraph, `add_to_cart` and `get_cart` only,
-`POST /api/chat` returning a single non-streamed reply. The goal is one successful tool call from a
-local model, end to end. Expect to spend the time here on model choice and prompt phrasing, not on
-graph code.
+**M4 — Persistence, streaming, and a CLI.** Postgres checkpointer keyed on `visit_id`, `astream_events`
+→ SSE (§7.2), and `scripts/shop_cli.py` so the barista is usable from a terminal. Remaining tools
+including `change_size`: `size_required` is the first error the barista must answer with a *question*
+rather than an apology, which is a good check that error envelopes are being read aloud properly.
 
-**M4 — Full tool set + streaming.** Remaining tools including `change_size`, SSE streaming of tokens and
-domain events, live cart/wallet updates, error recovery on insufficient funds and unknown items. Sizes
-land here on the agent side: `size_required` is the first error the barista has to answer with a
-*question* rather than an apology, which is a good check that error envelopes are being read aloud
-properly.
+**M5 — Memory.** Computed customer profile, "the usual" with size and availability, day and weekday
+transitions, and the background visit-summarization pass (§6.5.1) writing profile notes.
 
-**M5 — Agent telemetry.** Manual spans for graph nodes, tool calls, and LLM calls (§9.3); the agent
-metrics from §9.4; log/trace correlation; the provisioned Grafana dashboard. Best done now rather than
-at the end, because M6's prompt tuning is guesswork without `agent.loop.iterations` and
-`agent.tool.malformed` in front of you.
+**M6 — Agent telemetry depth.** Manual spans for graph nodes, tool calls, and LLM calls (§9.3); the agent
+metrics from §9.4; log/trace correlation; the provisioned Grafana dashboard. Before prompt tuning, since
+that is guesswork without `agent.loop.iterations` and `agent.tool.malformed` in front of you.
 
-**M6 — Memory.** Postgres checkpointer, computed customer profile, "the usual" suggestions, day and
-weekday transitions, and the background visit-summarization pass (§6.5.1) writing profile notes.
+**M7 — Frontend.** React storefront with the name input, chat panel consuming the SSE stream, cart and
+wallet panels updating live, a small/medium/large selector on drinks and none on food, day transition.
 
-**M7 — Polish.** Prompt tuning against the §9 dashboards, the edge-case table (§4.5), the opening
-greeting, day transition animation, `docker compose up` from a clean checkout.
+**M8 — Hardening.** Scenario suite against the real model, prompt tuning against the M6 dashboards, the
+edge-case table (§4.5), `docker compose up` from a clean checkout.
+
+> **Why the UI moved late.** An earlier draft built a button-only React app second, as a no-LLM fallback
+> for telling a domain bug apart from an agent bug. That fallback is worth having, but the domain test
+> suite and `curl` against the M2 endpoints serve it at a fraction of the cost — and a CLI (M4) turns out
+> to be a *better* debugging surface for an agent than a chat window, because the transcript stays in the
+> scrollback next to the trace. Building the UI first meant days of frontend work before touching
+> LangGraph, which is the opposite of what this project is for.
 
 Stretch: further modifiers — milk, extra shots (§3.6) — a second agent (a manager who restocks or changes prices), barista
 tone-of-voice presets, voice input, evaluation harness scoring conversations against scripted

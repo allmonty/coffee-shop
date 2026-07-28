@@ -17,15 +17,19 @@ engine per test costs a few milliseconds and removes the whole failure mode.
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from alembic import command
+from alembic.config import Config
 from settings import settings
 
 TEST_DB_NAME = "coffee_shop_test"
+API_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_database_url() -> str:
@@ -47,20 +51,24 @@ async def _create_database_and_schema() -> None:
     finally:
         await admin_engine.dispose()
 
-    engine = create_async_engine(test_database_url())
-    try:
-        async with engine.begin() as conn:
-            # Scratch table so fixture isolation is testable before any real model
-            # exists. Harmless once the schema lands.
-            await conn.execute(text("CREATE TABLE IF NOT EXISTS scratch (id int primary key)"))
-    finally:
-        await engine.dispose()
+
+def _migrate(url: str) -> None:
+    """Run the real migrations, not `metadata.create_all`.
+
+    Tests then exercise the schema that actually ships, so a migration drifting
+    from the models fails here rather than in production.
+    """
+    alembic_cfg = Config(str(API_ROOT / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(API_ROOT / "alembic"))
+    alembic_cfg.attributes["db_url"] = url
+    command.upgrade(alembic_cfg, "head")
 
 
 @pytest.fixture(scope="session", autouse=True)
 def prepared_database() -> None:
     """Sync fixture so it owns its own loop and leaks nothing into the tests."""
     asyncio.run(_create_database_and_schema())
+    _migrate(test_database_url())
 
 
 @pytest_asyncio.fixture

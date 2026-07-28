@@ -38,4 +38,7 @@ class BaristaState(TypedDict, total=False):
     size_offers: dict[str, bool]
     size_declines: int
 
+    # barista→tools laps in the current turn; recorded as a histogram at finish.
+    loop_count: int
+
     visit_ended: bool

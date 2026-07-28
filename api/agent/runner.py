@@ -17,6 +17,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from agent.graph import build_graph
+from agent.summarize import summarize_visit
 
 # Tools whose success changes something the UI shows.
 CART_TOOLS = {"add_to_cart", "remove_from_cart", "change_size"}
@@ -38,6 +39,7 @@ async def run_turn(
     visit_id: uuid.UUID,
     message: str | None = None,
     event: str | None = None,
+    summary_llm=None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield `{type, ...}` frames for one turn."""
     text = message if message is not None else GREETING_PROMPTS.get(event or "", "")
@@ -73,10 +75,13 @@ async def run_turn(
             async for frame in _domain_frames(payload):
                 yield frame
 
-    yield {
-        "type": "done",
-        "visit_ended": bool(final_state.get("visit_ended")),
-    }
+    ended = bool(final_state.get("visit_ended"))
+    yield {"type": "done", "visit_ended": ended}
+
+    # After the stream is closed, never before: the customer is already walking
+    # out and must not wait on this (spec §6.5.1).
+    if ended:
+        await summarize_visit(session, user_id, final_state.get("messages", []), llm=summary_llm)
 
 
 async def _domain_frames(state: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:

@@ -19,6 +19,13 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from agent.instrumentation import (
+    loop_iterations,
+    node_span,
+    record_llm_call,
+    record_tool_result,
+    tool_span,
+)
 from agent.llm import build_llm
 from agent.prompts import system_prompt
 from agent.state import BaristaState
@@ -37,6 +44,11 @@ async def load_context(state: BaristaState, config: RunnableConfig) -> dict[str,
     if state.get("menu"):
         return {}
 
+    with node_span("load_context"):
+        return await _load_context(state, config)
+
+
+async def _load_context(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
     configurable = config.get("configurable", {})
     session = configurable["session"]
     visit_id = uuid.UUID(str(configurable["visit_id"]))
@@ -68,11 +80,16 @@ def make_barista(llm):
     model = llm.bind_tools(ALL_TOOLS)
 
     async def barista(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
-        # The system message is rebuilt every turn from live state, so the menu,
-        # wallet and cart the model sees are never stale.
-        messages = [SystemMessage(content=system_prompt(dict(state))), *state["messages"]]
-        reply = await model.ainvoke(messages, config)
-        return {"messages": [reply]}
+        with node_span("barista") as span:
+            # The system message is rebuilt every turn from live state, so the
+            # menu, wallet and cart the model sees are never stale.
+            messages = [SystemMessage(content=system_prompt(dict(state))), *state["messages"]]
+            reply = await model.ainvoke(messages, config)
+            record_llm_call(span, reply)
+            # Count laps here, record the total at finish. Recording 1 per
+            # lap would make the histogram meaningless — what matters is how
+            # many laps ONE turn took.
+            return {"messages": [reply], "loop_count": state.get("loop_count", 0) + 1}
 
     return barista
 
@@ -127,7 +144,9 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
             )
             continue
 
-        payload = await tool.ainvoke({**call["args"]}, config)
+        with tool_span(call["name"]) as span:
+            payload = await tool.ainvoke({**call["args"]}, config)
+            record_tool_result(span, call["name"], payload)
         results.append(
             ToolMessage(
                 content=json.dumps(payload),
@@ -152,7 +171,10 @@ def route_after_barista(state: BaristaState) -> str:
 
 
 async def finish(state: BaristaState) -> dict[str, Any]:
-    return {}
+    with node_span("finish"):
+        # The only place a model going in circles is visible (spec §9.4).
+        loop_iterations.record(state.get("loop_count", 0))
+        return {}
 
 
 def build_graph(llm=None, checkpointer=None):

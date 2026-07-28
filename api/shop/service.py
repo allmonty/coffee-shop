@@ -21,12 +21,14 @@ from shop.identity import (
     todays_menu,
     weekday_for,
 )
+from shop.notes import append_customer_notes
 from shop.orders import (
     end_visit,
     get_wallet_balance,
     order_history,
     place_order,
 )
+from shop.profile import customer_profile
 
 __all__ = [
     # identity and visits
@@ -45,4 +47,7 @@ __all__ = [
     "get_wallet_balance",
     "order_history",
     "place_order",
+    # memory
+    "append_customer_notes",
+    "customer_profile",
 ]

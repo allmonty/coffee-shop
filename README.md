@@ -22,13 +22,23 @@ containerised model runs CPU-only and is roughly an order of magnitude slower,
 which makes prompt iteration miserable.
 
 ```bash
-ollama pull qwen2.5:7b-instruct
+ollama pull qwen2.5:14b-instruct
 ollama serve                  # leave running
 
 make up                       # app :3000 · api :8000 · Grafana :3001
 ```
 
 `make up` tells you whether it can reach the model.
+
+**Choosing a model.** The default is `qwen2.5:14b-instruct` (~9 GB) because it
+follows the prompt's rules most reliably — asking which size, not inventing one.
+`qwen2.5:7b-instruct` is roughly twice as fast and occasionally sloppier;
+`qwen2.5:3b` is faster still and frequently ignores rules. Set `OLLAMA_MODEL` to
+switch. Whatever you pick, check it first:
+
+```bash
+cd api && uv run python scripts/check_tool_calling.py
+```
 
 ### Or put the model in a container too
 

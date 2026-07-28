@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Ollama, via its OpenAI-compatible API (spec §6.1). Swappable so a graph
     # bug can be told apart from a model bug by pointing at something bigger.
     ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_model: str = "qwen2.5:7b-instruct"
+    ollama_model: str = "qwen2.5:14b-instruct"
 
 
 settings = Settings()

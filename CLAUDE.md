@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Implemented and working end to end. `coffee-shop.md` (~1100 lines) remains the source of truth for
+Implemented and working end to end. `TOUR.md` is a guided walkthrough of the code for someone learning
+it. `coffee-shop.md` (~1100 lines) remains the source of truth for
 *why* — most decisions in it are load-bearing and were made against a plausible alternative, with the
 reasoning recorded inline. Read the relevant section before changing behaviour.
 

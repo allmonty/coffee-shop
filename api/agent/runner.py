@@ -16,11 +16,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
-from agent.graph import build_graph
 from agent.summarize import summarize_visit
-
-# Tools whose success changes something the UI shows.
-CART_TOOLS = {"add_to_cart", "remove_from_cart", "change_size"}
 
 GREETING_PROMPTS = {
     "on_enter": (
@@ -96,7 +92,3 @@ async def _domain_frames(state: dict[str, Any]) -> AsyncIterator[dict[str, Any]]
             "day": state.get("day"),
             "wallet_cents": state.get("wallet_cents"),
         }
-
-
-def build_runtime_graph(llm=None, checkpointer=None):
-    return build_graph(llm=llm, checkpointer=checkpointer)

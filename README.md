@@ -5,6 +5,9 @@ learn **agentic architecture**: LangGraph, tool-calling, agent state, a local
 model — with a deliberately small domain so the interesting complexity stays in
 the agent layer.
 
+**New here? Read [TOUR.md](TOUR.md)** — a guided walkthrough of the code in the
+order that makes the agent make sense, with experiments to try.
+
 `coffee-shop.md` is the full specification, including the reasoning behind each
 decision. `CLAUDE.md` lists the invariants that must survive changes.
 

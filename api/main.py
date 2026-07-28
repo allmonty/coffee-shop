@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import SessionLocal, engine
+from routers import chat as chat_router
 from routers import shop as shop_router
 from shop.seed import seed_catalog
 from telemetry import setup_telemetry
@@ -35,6 +36,7 @@ app.add_middleware(
 )
 
 app.include_router(shop_router.router)
+app.include_router(chat_router.router)
 
 
 @app.get("/health")

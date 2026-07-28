@@ -14,7 +14,7 @@ from agent.graph import build_graph, route_after_barista
 from shop.models import MenuItem, VisitMenuItem
 from shop.seed import seed_catalog
 from shop.service import enter
-from tests.fakes import FakeToolCallingModel, says, tool_call
+from tests.fakes import FakeToolCallingModel, says, tool_call, tool_calls
 
 PINNED = ["Latte", "Filter Coffee", "Chocolate Chip Cookie", "Croissant"]
 
@@ -229,6 +229,41 @@ async def test_end_visit_closes_the_visit(shop):
     )
 
     assert result["visit_ended"] is True
+
+
+async def test_two_tool_calls_in_one_message_run_in_order(shop):
+    """Regression: "add it and charge me" in a single assistant turn.
+
+    LangGraph's prebuilt ToolNode runs a turn's calls concurrently. Sharing one
+    AsyncSession that is unsafe, and causally wrong — place_order read the cart
+    before add_to_cart had committed and failed with empty_cart. Found by
+    talking to the real model; no scripted test emitted two calls at once.
+    """
+    run, _, _ = shop
+
+    result = await run(
+        [
+            tool_calls(
+                ("add_to_cart", {"item_name": "Latte", "quantity": 1, "size": "small"}),
+                ("place_order", {"confirmed_total_cents": 400}),
+            ),
+            says("Enjoy."),
+        ]
+    )
+
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert len(tool_messages) == 2
+    assert "empty_cart" not in tool_messages[1].content
+    assert result["wallet_cents"] == 1600
+
+
+async def test_an_unknown_tool_name_does_not_crash_the_turn(shop):
+    run, _, _ = shop
+
+    result = await run([tool_calls(("teleport", {})), says("Sorry, what was that?")])
+
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert "unknown_tool" in tool_messages[0].content
 
 
 async def test_tools_require_injected_config(shop):

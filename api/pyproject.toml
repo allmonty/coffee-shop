@@ -47,3 +47,8 @@ asyncio_default_fixture_loop_scope = "function"
 # Concurrency tests hold real transactions. A lock-wait bug should fail the
 # suite in seconds, not hang it — the whole suite runs in under two.
 timeout = 30
+# Scenario tests drive the real model. Flaky by nature, slow, and they need
+# Ollama — so they are deselected unless asked for by name:
+#   uv run pytest -m scenario
+markers = ["scenario: conversations against the real local model"]
+addopts = "-m 'not scenario'"

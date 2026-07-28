@@ -24,6 +24,7 @@ from agent.instrumentation import (
     node_span,
     record_llm_call,
     record_tool_result,
+    tool_malformed,
     tool_span,
 )
 from agent.llm import build_llm
@@ -145,7 +146,22 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
             continue
 
         with tool_span(call["name"]) as span:
-            payload = await tool.ainvoke({**call["args"]}, config)
+            try:
+                payload = await tool.ainvoke({**call["args"]}, config)
+            except Exception as error:
+                # A malformed tool call must never crash the turn. Small models
+                # drop required arguments constantly; handing the problem back
+                # as an ordinary envelope lets the barista fix it and retry,
+                # which is exactly what it does with any other tool error.
+                payload = {
+                    "ok": False,
+                    "error": "invalid_arguments",
+                    "message": (
+                        f"That call to {call['name']} was missing something: {error}. "
+                        "Check the arguments and try again."
+                    ),
+                }
+                tool_malformed.add(1, {"reason": "invalid_arguments"})
             record_tool_result(span, call["name"], payload)
         results.append(
             ToolMessage(

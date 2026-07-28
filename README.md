@@ -13,18 +13,35 @@ decision. `CLAUDE.md` lists the invariants that must survive changes.
 
 ## Running it
 
-Needs Docker and [uv](https://docs.astral.sh/uv/). Ollama is strongly
-recommended **on the host** rather than in Docker — containers get no GPU on
-Apple Silicon, which makes prompt iteration painful.
+Needs Docker and [uv](https://docs.astral.sh/uv/).
+
+**The model does not run in Docker by default.** `make up` starts four
+containers — web, api, db, otel — and expects Ollama on your host. That is
+deliberate: Docker Desktop on Apple Silicon has no GPU passthrough, so a
+containerised model runs CPU-only and is roughly an order of magnitude slower,
+which makes prompt iteration miserable.
 
 ```bash
 ollama pull qwen2.5:7b-instruct
-ollama serve
+ollama serve                  # leave running
 
-docker compose up --build     # app :3000 · api :8000 · Grafana :3001
+make up                       # app :3000 · api :8000 · Grafana :3001
+```
+
+`make up` tells you whether it can reach the model.
+
+### Or put the model in a container too
+
+One command, nothing installed on the host — good on Linux, in CI, or on a
+machine without Ollama. Slower on Apple Silicon.
+
+```bash
+make up-with-llm              # first run downloads several GB
+docker compose logs -f llm    # watch the pull
 ```
 
 Then open <http://localhost:3000>, type a name, and order a coffee.
+`make down` stops everything.
 
 ## Talking to the barista in a terminal
 

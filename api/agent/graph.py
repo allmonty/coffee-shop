@@ -11,18 +11,18 @@ next to what it does (prompts.py, tools.py, shop/).
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 
 from agent.llm import build_llm
 from agent.prompts import system_prompt
 from agent.state import BaristaState
-from agent.tools import ALL_TOOLS
+from agent.tools import ALL_TOOLS, TOOLS_BY_NAME
 from shop import service
 from shop.pricing import load_size_deltas
 from shop.profile import customer_profile
@@ -96,6 +96,49 @@ async def refresh(state: BaristaState, config: RunnableConfig) -> dict[str, Any]
     }
 
 
+async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
+    """Execute this turn's tool calls **one at a time, in order**.
+
+    LangGraph's prebuilt `ToolNode` runs them concurrently, which is wrong here
+    for two reasons:
+
+    1. They share one `AsyncSession`, and SQLAlchemy sessions are not safe for
+       concurrent use.
+    2. The calls are causally ordered. A model that emits
+       `add_to_cart` + `place_order` in one turn means "add it, then charge me";
+       run concurrently, `place_order` reads the cart before `add_to_cart` has
+       committed and fails with `empty_cart`.
+
+    Found by talking to the real model — the scripted tests never emitted two
+    calls in a single message.
+    """
+    last = state["messages"][-1]
+    results: list[ToolMessage] = []
+
+    for call in last.tool_calls:
+        tool = TOOLS_BY_NAME.get(call["name"])
+        if tool is None:
+            results.append(
+                ToolMessage(
+                    content=json.dumps({"ok": False, "error": "unknown_tool"}),
+                    tool_call_id=call["id"],
+                    name=call["name"],
+                )
+            )
+            continue
+
+        payload = await tool.ainvoke({**call["args"]}, config)
+        results.append(
+            ToolMessage(
+                content=json.dumps(payload),
+                tool_call_id=call["id"],
+                name=call["name"],
+            )
+        )
+
+    return {"messages": results}
+
+
 def route_after_barista(state: BaristaState) -> str:
     """The whole agent loop, in one function.
 
@@ -118,7 +161,7 @@ def build_graph(llm=None, checkpointer=None):
 
     graph.add_node("load_context", load_context)
     graph.add_node("barista", make_barista(llm or build_llm()))
-    graph.add_node("tools", ToolNode(ALL_TOOLS))
+    graph.add_node("tools", run_tools)
     graph.add_node("refresh", refresh)
     graph.add_node("finish", finish)
 

@@ -28,6 +28,21 @@ def tool_call(name: str, **arguments) -> AIMessage:
     )
 
 
+def tool_calls(*calls: tuple[str, dict]) -> AIMessage:
+    """Several tools asked for in ONE assistant turn.
+
+    Real models do this constantly ("add it and charge me"), and it is the case
+    that exposed the concurrent-tool-execution bug.
+    """
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": name, "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"}
+            for name, args in calls
+        ],
+    )
+
+
 def says(text: str) -> AIMessage:
     """An assistant turn that just talks — this is what ends a turn."""
     return AIMessage(content=text)

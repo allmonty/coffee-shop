@@ -542,14 +542,15 @@ flowchart TD
 
     B["barista<br/>LLM call with tools bound<br/>context block re-rendered every turn"]
 
-    B -- "last message has tool_calls" --> T["tools · ToolNode"]
-    T -- "ToolMessages appended to state" --> B
+    B -- "last message has tool_calls" --> T["tools · run_tools<br/>one call at a time, in order (§13.7)"]
+    T -- "ToolMessages appended to state" --> R["refresh<br/>re-read cart · wallet"]
+    R --> B
     B -- "no tool_calls — plain reply" --> F["finish"]
 
     F -- "visit_ended = false" --> E(["END<br/>thread stays open for the next turn"])
     F -- "visit_ended = true" --> EC(["END<br/>thread closed, day advanced"])
 
-    subgraph TOOLS["what the ToolNode can call"]
+    subgraph TOOLS["what the tools node can call"]
         direction LR
         RO["read-only<br/>get_wallet_balance<br/>get_usual_order<br/>get_cart<br/>get_menu — rarely, menu is in context"]
         MU["mutating<br/>add_to_cart<br/>remove_from_cart"]
@@ -576,7 +577,14 @@ flowchart TD
   them into the context block. Runs only when the thread has no prior messages; the menu cannot change
   mid-visit, so it is never re-fetched.
 - `barista` is the LLM call with tools bound.
-- `tools` is a `ToolNode` executing the requested calls against `shop.service`, then looping back.
+- `tools` is `run_tools`, executing the requested calls against `shop.service` **sequentially**, then
+  looping back. Not LangGraph's prebuilt `ToolNode` — see §13.7 for why the swap was necessary.
+- A tool that raises returns an envelope rather than propagating, and so does a tool name the model
+  invented (`unknown_tool`). Both carry a `message` and both count towards `agent.tool.malformed`
+  (§9.4); an envelope without a message just moves the invention from the tool name to the excuse.
+- `refresh` re-reads the cart and wallet after tools ran, before the model speaks again. Without it the
+  barista reads a stale total out loud immediately after changing the cart. The menu is not re-read: it
+  cannot change mid-visit.
 - A conditional edge routes on whether the last message contains tool calls. **This edge is the agent
   loop** — everything else in the graph is setup and teardown around it.
 - `finish` checks `visit_ended` and terminates the thread if the user went home.
@@ -1177,6 +1185,16 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
 6. **Sizes ship in v1, other modifiers do not** (§3.4, §3.6). Size alone already teaches the
    partial-specification lesson — "a latte" is a reasonable sentence the agent cannot act on — and every
    further modifier multiplies the clarifying questions needed before a single order can complete.
+7. **Tool calls run sequentially, in our own `run_tools` rather than LangGraph's `ToolNode`** (§6.3).
+   The prebuilt node runs a turn's calls concurrently, which is wrong here twice over: they share one
+   `AsyncSession`, which is not safe for concurrent use, and they are causally ordered — a model
+   emitting `add_to_cart` + `place_order` in one message means "add it, *then* charge me", and run
+   concurrently `place_order` reads the cart before `add_to_cart` committed and fails with `empty_cart`.
+   The alternative was a session per tool call, which buys parallelism the domain cannot use (a turn
+   holds two or three calls) at the cost of losing read-your-own-writes inside the turn. Sequential
+   execution is also what makes the trace readable in the order the customer's sentence implied.
+   Found by talking to the real model, not by a test (`69ac67f`); no scripted test emitted two calls in
+   one message, so the suite was green throughout.
 
 ### Still open
 

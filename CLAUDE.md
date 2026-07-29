@@ -96,7 +96,10 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
   them concurrently, which breaks both the shared `AsyncSession` and the causal order of
   "add it, then charge me". Do not swap it back.
 - **A malformed tool call returns an envelope, never raises.** Small models drop required arguments
-  constantly; the barista has to be able to fix and retry.
+  constantly; the barista has to be able to fix and retry. An *invented* tool name is the same case:
+  `{ok, error, message}` like everything else — the message lists the real tools — plus a
+  `tool.unknown` span and an `agent.tool.malformed` increment. Model-written strings never become span
+  names or metric labels.
 - **A failed tool marks its own span, not the parent turn.** "insufficient funds" is a normal outcome,
   and marking it a request error makes every dashboard lie.
 

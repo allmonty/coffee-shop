@@ -1,6 +1,6 @@
 """The agent loop (spec §6.3).
 
-    START → load_context → barista ⇄ tools → finish → END
+    START → load_context → barista ⇄ (tools → refresh) → finish → END
 
 The conditional edge out of `barista` **is** the agent. Everything else is setup
 and teardown. If you read one file in this project, read this one.
@@ -132,6 +132,11 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
 
     Found by talking to the real model — the scripted tests never emitted two
     calls in a single message.
+
+    Nothing in here may raise: a tool that throws (`invalid_arguments`) and a
+    tool name the model invented (`unknown_tool`) both come back as ordinary
+    envelopes, because the caller is a language model and the turn has to survive
+    either.
     """
     last = state["messages"][-1]
     results: list[ToolMessage] = []
@@ -142,7 +147,7 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
             if tool is None:
                 results.append(
                     ToolMessage(
-                        content=json.dumps({"ok": False, "error": "unknown_tool"}),
+                        content=json.dumps(_unknown_tool(call)),
                         tool_call_id=call["id"],
                         name=call["name"],
                     )
@@ -178,6 +183,41 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
             )
 
     return {"messages": results}
+
+
+def _unknown_tool(call: dict[str, Any]) -> dict[str, Any]:
+    """An invented tool name is an ordinary tool failure, so treat it as one.
+
+    Two things this must do that the earlier bare `{ok, error}` did not:
+
+    1. **Carry a `message`.** Every envelope does (spec §6.4). Without one the
+       model has nothing to work from and invents an explanation for the
+       customer — the same failure mode `Result.failure` refuses to allow.
+    2. **Leave a trace.** It gets a tool span and counts towards
+       `agent.tool.malformed`, whose whole purpose is "unparseable or *invented*
+       tool calls" — the invented half was never being counted, so a model
+       hallucinating tools looked like a healthy turn on the dashboard.
+
+    The span and metric use the fixed name `unknown`, with the requested name in
+    an attribute: the name came from a language model, and putting it in a span
+    name or a metric label is unbounded cardinality (§9.3).
+    """
+    payload = {
+        "ok": False,
+        "error": "unknown_tool",
+        "message": (
+            f"There is no {call['name']} tool. The tools you have are: "
+            f"{', '.join(TOOLS_BY_NAME)}. Use one of those, or just answer in words."
+        ),
+    }
+
+    with tool_span("unknown") as span:
+        span.set_attribute("tool.requested", call["name"])
+        record_tool_call(call["name"], call.get("args") or {})
+        record_tool_result(span, "unknown", payload)
+        tool_malformed.add(1, {"reason": "unknown_tool"})
+
+    return payload
 
 
 def route_after_barista(state: BaristaState) -> str:

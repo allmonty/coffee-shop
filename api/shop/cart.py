@@ -101,7 +101,12 @@ async def add_to_cart(
     quantity: int = 1,
     size: str | None = None,
 ) -> Result:
-    """Four distinct failures, because they are four distinct truths."""
+    """Four of these failures are distinct truths, not one generic rejection.
+
+    `unknown_item` / `not_available_today` / `size_required` / `size_not_applicable`
+    each need a different sentence from the barista. The rest — `visit_closed`,
+    `invalid_quantity`, `unknown_size` — are mechanical.
+    """
     if await open_visit(session, visit_id) is None:
         return _visit_closed()
 

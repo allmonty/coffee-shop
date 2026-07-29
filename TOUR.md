@@ -3,7 +3,7 @@
 Read this with the repo open beside you. It goes in the order that makes the
 agent make sense, which is **not** the order the files are laid out in.
 
-Roughly 45 minutes of reading, plus the experiments. Every stop names the file
+Roughly an hour of reading, plus the experiments. Every stop names the file
 and the function, and most end with something to try — the experiments are the
 part that actually teaches, because watching a rule break tells you what it was
 holding up.
@@ -46,6 +46,11 @@ That single constraint is what makes the project legible. The domain can be read
 and tested as an ordinary Python app; the agent can be read as a thing that
 *talks to* an ordinary Python app.
 
+Note what holds it up today: nothing but this paragraph. The spec (§5.1) calls for
+an import-linter contract in CI and there isn't one yet, which makes it the
+cheapest useful contribution to the repo — an in-process boundary is far easier to
+breach by accident than a network one.
+
 > **Look:** `api/agent/graph.py`, the `_load_context` function. It needs the
 > current day. The obvious way is `session.get(Visit, visit_id)` — but that
 > would import a model into `agent/`. It calls `service.get_wallet_balance()`
@@ -53,7 +58,7 @@ and tested as an ordinary Python app; the agent can be read as a thing that
 
 ---
 
-## Stop 2 — The envelope (`api/shop/result.py`, 47 lines)
+## Stop 2 — The envelope (`api/shop/result.py`, 44 lines)
 
 The smallest file in the project, and everything else is shaped by it.
 
@@ -84,8 +89,9 @@ JSON directly, and small models handle `balance_cents` noticeably better than
 
 Skim the rest of `shop/` later. Read this one function properly.
 
-It can fail in four different ways, and **each is a different truth the barista
-has to tell the customer**:
+It returns seven different errors, and four of them are the interesting ones —
+**each is a different truth the barista has to tell the customer** (the other
+three, `visit_closed`, `invalid_quantity` and `unknown_size`, are mechanical):
 
 | error | what it means |
 | --- | --- |
@@ -111,8 +117,12 @@ asks instead of guessing. Its message is a question, read aloud verbatim.
 **This is the file.** If you read one thing, read this.
 
 ```
-START → load_context → barista ⇄ tools → refresh → finish → END
+START → load_context → barista ⇄ (tools → refresh) → finish → END
 ```
+
+The brackets matter: the cycle is `barista → tools → refresh → barista`, and
+`finish` hangs off `barista`, not off `refresh`. Only a reply with no tool calls
+leaves the loop.
 
 Read `build_graph()` at the bottom first — it's just wiring, ~20 lines. Then
 `route_after_barista`:
@@ -134,7 +144,9 @@ Then read the nodes in this order:
 
 1. **`load_context`** — runs on the *first turn only*. Loads profile, menu,
    wallet, cart. The menu can't change mid-visit, so re-reading it every turn
-   would be a round-trip for data that cannot have moved.
+   would be a round-trip for data that cannot have moved. Note *how* it knows
+   which turn it is: `if state.get("menu"): return {}`. That's a bet on state
+   surviving between turns — read the next-but-one section before you copy it.
 2. **`barista`** (inside `make_barista`) — the LLM call. Note the system message
    is rebuilt from live state *every turn*, so what the model sees is never
    stale. Note also `llm` is a parameter: that's what lets tests inject a fake.
@@ -161,6 +173,38 @@ Nodes return **partial** state, and a reducer decides how it merges. For
 which is why `barista` can return one new message and the conversation keeps the
 rest. Every other field in that TypedDict is plain replace-on-write.
 
+### Where the conversation lives between turns
+
+The graph is invoked with **one** message — look at `run_turn`:
+
+```python
+graph.astream({"messages": [HumanMessage(content=text)]}, config=config, ...)
+```
+
+Nothing in that call carries the previous turn. What makes the barista
+conversational is the **checkpointer** plus one line in that config:
+
+```python
+"thread_id": str(visit_id),      # agent/runner.py
+```
+
+LangGraph loads the thread's saved state, the `add_messages` reducer appends the
+new message to it, and the whole state is saved again at the end of the turn.
+`agent/checkpointer.py` is the store: Postgres, in its own `agent_checkpoints`
+schema so that LangGraph's table format — which will change under you — stays out
+of your own tables. `thread_id = visit_id` is the design: one visit is one
+conversation, and re-entering a visit resumes it mid-sentence.
+
+This is the piece to get right first in any agent you build, and the easiest to
+leave half-wired: the checkpointer is process-wide, opened in `main.py`'s lifespan
+and handed to the router with `set_checkpointer()`. If it is missing, nothing
+crashes — every turn just starts from an empty state and the agent quietly
+becomes amnesiac. That exact bug shipped here; see bug 6 at the end.
+
+> **Try it:** run the CLI, order a latte over two messages ("a latte" then
+> "large"), then type `/state` — it prints the message count from
+> `graph.aget_state`, i.e. what the checkpointer is holding for that visit.
+
 ---
 
 ## Stop 5 — Tools are an API, not database access (`api/agent/tools.py`)
@@ -175,6 +219,22 @@ you're learning it.
 **Wrappers hold no logic.** Unpack config, call the domain, return the envelope
 verbatim. Any rule that lived here would be a rule the REST API doesn't enforce,
 so the same order would behave differently clicked versus spoken.
+
+**The docstrings are prompt text.** This is the part people miss. `bind_tools`
+sends each tool's name, signature and docstring to the model as its schema, so
+`add_to_cart`'s docstring —
+
+```
+size: REQUIRED for drinks, and it must be what the customer actually said —
+ask them if they did not say one. Omit this argument entirely for food;
+passing it for a cookie or pastry is an error.
+```
+
+— is not documentation for you. It is an instruction to the model, written in the
+place the model is guaranteed to read it, and it is the cheapest lever you have
+on tool-calling accuracy. Note what it does *not* do: it never says what a size
+costs. Prices stay in the domain, so the schema can't teach the model to invent
+one.
 
 Look at `_context()`. Session and `visit_id` arrive through LangGraph's
 `config["configurable"]`, injected by the caller — not globals, not closures.
@@ -204,9 +264,12 @@ Size prices are one surcharge line rather than three prices per drink; printing
 them per item would triple the longest block in the prompt to say the same thing
 thirty times.
 
-> **Try it:** in `scripts/shop_cli.py` add `print(system_prompt(dict(state)))`
-> somewhere, or just read `tests/test_memory.py::test_notes_reach_the_context_block`
-> which asserts a remembered note actually shows up in the next prompt.
+> **Try it:** the state the prompt is rendered from lives inside the graph, so
+> reach it through the checkpointer rather than by adding a print: the CLI has
+> `/state`, `/cart` and `/wallet` for exactly this (`scripts/shop_cli.py`,
+> `graph.aget_state`). Then read
+> `tests/test_memory.py::test_notes_reach_the_context_block`, which asserts a
+> remembered note actually shows up in the next prompt.
 
 ---
 
@@ -273,8 +336,17 @@ A common confusion, kept deliberately separate here:
 the usual, visit count — all SQL (`api/shop/profile.py`). Only free-text notes
 come from the model (`api/agent/summarize.py`).
 
-`usual_order` groups by **(item, size)**, which is what lets the barista say
-"large, like always?" instead of asking a regular the same question daily.
+`usual_order` is stitched from **two** aggregates in `customer_profile()`, and
+it's worth seeing why: `_ordered_totals()` groups by (item, category) to find the
+favourite drink and food, then `_favourite_size_per_item()` groups by (item,
+size) to find how they take it. The second query is what lets the barista say
+"large, like always?" instead of asking a regular the same question daily. One
+combined `GROUP BY (item, size)` would split someone's Latte habit across three
+size rows and make their favourite drink look like three lesser ones.
+
+Each line also carries `available_today`, set by `_available_today()`. A profile
+that suggests something the shop didn't draw today is worse than one that
+suggests nothing.
 
 Read `summarize.py` for the three rules that exist because of how models behave:
 
@@ -296,12 +368,16 @@ open Grafana on <http://localhost:3001> and find it:
 
 ```
 agent.turn
-├── graph.node.load_context
+├── graph.node.load_context      (first turn of the visit only)
 ├── graph.node.barista      → gen_ai.chat   (LLM call #1)
 ├── graph.node.tools        → tool.add_to_cart
+├── graph.node.refresh
 ├── graph.node.barista      → gen_ai.chat   (LLM call #2)
 └── graph.node.finish
 ```
+
+Grafana needs the stack up (`make up`); the span tree itself is asserted by tests
+without a collector.
 
 Reading that once tells you things a log line never will: that a turn cost two
 model round-trips, where the context tokens went, that the database was never the
@@ -314,6 +390,13 @@ Two conventions worth stealing:
   every dashboard lie.
 - **`agent.loop.iterations` counts laps *per turn*, not one per lap.** It's the
   only place a model going in circles is visible.
+- **Every node that touches the database gets a span**, or the trace has a hole
+  in it. `refresh` was missing one, so its two queries appeared under the parent
+  with nothing to attribute them to — the kind of gap you only notice when you
+  are already lost. Same class of mistake as `run_tools` missing one before it.
+- **Model-written strings never become span names or metric labels.** An invented
+  tool name goes in an attribute (Stop 7); the span stays `tool.unknown`.
+  Cardinality is a property of your dashboard's health, not of the model's mood.
 
 > **Try it:** `uv run pytest tests/test_agent_spans.py -v` asserts the span tree
 > without needing a collector.
@@ -323,9 +406,16 @@ Two conventions worth stealing:
 ## Stop 10 — Getting it to the browser
 
 `api/agent/runner.py` (`run_turn`) turns one turn into typed frames — `token`,
-`cart_updated`, `wallet_updated`, `visit_ended`, `done`. Both the CLI and the SSE
-endpoint consume it, which is why the terminal and the browser show the same
-thing.
+`cart_updated`, `wallet_updated`, `visit_ended`, `done`, and `error`. Both the CLI
+and the SSE endpoint consume it, which is why the terminal and the browser show
+the same thing — and why the CLI is a usable debugging surface for a web bug.
+
+The frames come from two of LangGraph's stream modes at once:
+`stream_mode=["messages", "values"]`. `messages` gives token-by-token output —
+filtered to `AIMessage` chunks only, because forwarding `ToolMessage` chunks
+printed raw envelope JSON into the conversation — and `values` gives a state
+snapshot per node, which `_domain_frames` turns into `cart_updated` /
+`wallet_updated`. That is why the cart can move mid-sentence.
 
 `api/routers/chat.py` is the only streaming code. Note it builds its **own**
 session rather than using the request-scoped dependency: FastAPI closes those
@@ -355,15 +445,18 @@ undo it.
 | Drop the menu from `render_context` | Nothing fails — but watch `agent.loop.iterations` climb | Tests can't catch every regression |
 | Remove the `size` check constraint | `test_sized_food_line_is_rejected` | Make bad states unrepresentable |
 | Make `summarize` always return a note | `test_summarize_stores_nothing_when_nothing_stood_out` | Models invent when told to produce |
+| `set_checkpointer(None)` in `main.py`'s lifespan | `test_the_endpoint_remembers_the_previous_turn` | No store, no conversation |
 
 The fourth one is the most instructive: a change that no test catches, but which
 doubles the cost of every turn. That's what the metrics are for.
 
 ---
 
-## The four bugs this project actually hit
+## The bugs this project actually hit
 
 Each is a commit you can read, and each teaches something a tutorial wouldn't.
+The first four landed inside the phase commit that fixed them, so expect a large
+diff around a small fix.
 
 1. **`69ac67f` — concurrent tool calls.** Found by talking to the real model. No
    scripted test emitted two calls in one message, so the suite was green.
@@ -381,6 +474,51 @@ Each is a commit you can read, and each teaches something a tutorial wouldn't.
 4. **`c54f7c0` — a race the spec missed.** Writing a concurrency test for users
    revealed the same flaw in the visit path: two tabs, two wallets, one day.
    *Lesson: when you find a race in one place, look for its twin.*
+
+5. **An invented tool name came back without a `message`.** Every other envelope
+   in the project carries the sentence the barista says; this one branch returned
+   a bare `{ok, error}`, leaving the model to make one up. It was also invisible
+   in the trace, while `agent.tool.malformed` claimed in its own description to
+   count invented tools.
+   *Lesson: an invariant holds only on the paths you actually wrote it on. Grep
+   for the branch that skips it — it will be the error path.*
+
+6. **The browser was amnesiac; the CLI was not.** `routers/chat.py` compiled the
+   graph with `checkpointer=None`, so every POST started from an empty state:
+   "a latte" → "which size?" → "large" lost the latte, `load_context` re-ran
+   every turn, and the upsell backstops reset between messages. `scripts/shop_cli.py`
+   opened a real checkpointer, so the terminal — where all the manual testing
+   happened — worked perfectly.
+   *Lesson: the second caller of your agent is where the wiring rots. Test the
+   entry point the user actually uses, and remember that a missing checkpointer
+   fails silently rather than loudly.*
+
+---
+
+## The same lessons, without the coffee
+
+Everything above is one domain's version of a general rule. If you build a
+different agent, this is the transferable part — the shop is only the example.
+
+| Build this | Here it is | Because |
+| --- | --- | --- |
+| A domain layer that doesn't know an LLM exists | `shop/` (Stop 1) | It stays testable as ordinary code, and the same rules apply to every caller |
+| One result shape, message mandatory | `shop/result.py` (Stop 2) | A failure without a sentence is a failure the model narrates for you |
+| Errors that are distinct truths, not one "rejected" | `add_to_cart` (Stop 3) | Collapsing them is how an agent ends up lying politely |
+| Loop control in one readable function | `route_after_barista` (Stop 4) | If you can't point at the loop, you can't reason about its cost |
+| State that survives the turn, keyed on the conversation | checkpointer + `thread_id` (Stop 4) | Without it your agent is a one-shot prompt with extra steps |
+| Tools named after the functions they call | `agent/tools.py` (Stop 5) | One grep from tool call to SQL, forever |
+| Tool docstrings written *at the model* | `add_to_cart`'s schema (Stop 5) | It is the one instruction the model always reads |
+| A prompt rendered from live state each turn | `render_context()` (Stop 6) | A stale context block makes the model confidently wrong |
+| Irreversible actions gated in code, not prose | `confirmed_total_cents` (Stop 7) | "The prompt says not to" is the weakest enforcement available |
+| Sequential tools when calls are causal | `run_tools` (Stop 7) | The model's order is the customer's intent |
+| A tool boundary that absorbs bad input | `invalid_arguments`, `unknown_tool` (Stop 7) | The caller is a language model; it will send nonsense |
+| Facts from SQL, opinions from the model | `profile.py` vs `summarize.py` (Stop 8) | Never ask an LLM for something a `GROUP BY` can produce |
+| A trace shaped like the loop | `instrumentation.py` (Stop 9) | "Two inferences per turn" is invisible in logs |
+| A scripted model in the test suite | `tests/fakes.py` | Deterministic tests of the shapes real models produce |
+
+The ordering is roughly the order to build them in. The first five are structure;
+the rest are the things you only learn by watching a small model behave badly.
 
 ---
 

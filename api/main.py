@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from agent.checkpointer import open_checkpointer
 from db import SessionLocal, engine
 from routers import chat as chat_router
 from routers import shop as shop_router
@@ -21,7 +22,14 @@ async def lifespan(app: FastAPI):
     setup_telemetry(app, engine)
     async with SessionLocal() as session:
         await seed_catalog(session)
-    yield
+
+    # The conversation store is process-wide and has to outlive every request —
+    # `thread_id = visit_id`, so a visit's turns find each other (spec §6.5).
+    # Opening it per turn would defeat the point of having one.
+    async with open_checkpointer() as checkpointer:
+        chat_router.set_checkpointer(checkpointer)
+        yield
+
     await engine.dispose()
 
 

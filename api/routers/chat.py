@@ -28,12 +28,33 @@ router = APIRouter(prefix="/api", tags=["chat"])
 # One compiled graph for the process. Compiling per request would re-create the
 # whole StateGraph on every message for no benefit.
 _graph = None
+_checkpointer = None
+
+
+def set_checkpointer(saver) -> None:
+    """Install the conversation store. Called once, from the app lifespan.
+
+    Without it the graph runs with no checkpointer and every POST starts from an
+    empty state: `{"messages": [HumanMessage(...)]}` and nothing else. The
+    barista then cannot see the sentence before ("a latte" → "which size?" →
+    "large" loses the latte), `load_context` re-runs every turn because `menu` is
+    never already in state, and the `upsell_used` / `size_declines` backstops
+    reset between messages.
+
+    The CLI has always opened one itself (`scripts/shop_cli.py`), which is how
+    the terminal came to work while the browser quietly did not.
+    """
+    global _checkpointer, _graph
+    _checkpointer = saver
+    # Drop the compiled graph so a checkpointer installed after the first request
+    # cannot be silently ignored.
+    _graph = None
 
 
 def get_graph():
     global _graph
     if _graph is None:
-        _graph = build_graph(checkpointer=None)
+        _graph = build_graph(checkpointer=_checkpointer)
     return _graph
 
 

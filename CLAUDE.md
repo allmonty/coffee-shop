@@ -12,7 +12,7 @@ reasoning recorded inline. Read the relevant section before changing behaviour.
 ## Commands
 
 ```bash
-make test          # 172 tests, needs only Postgres — no Ollama
+make test          # 176 tests, needs only Postgres — no Ollama
 make lint          # ruff check + format --check
 make up            # full stack: app :3000, api :8000, Grafana :3001
 
@@ -89,6 +89,9 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
   can produce.
 - **Raw transcripts are never re-injected into a prompt.** Cross-visit memory arrives only via the
   computed profile and summarized notes.
+- **Every caller of the graph supplies the checkpointer.** `main.py`'s lifespan opens it and hands it
+  to `routers/chat.py` via `set_checkpointer()`; the CLI opens its own. Compiling the graph without one
+  does not fail — it silently makes the agent amnesiac, because each turn starts from empty state.
 - **Telemetry is best-effort.** `api` must not `depends_on: otel`; a failed exporter must never fail a
   request. Metrics are for what only the runtime knows — order counts and revenue come from SQL, not
   from counters.

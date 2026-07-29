@@ -81,6 +81,10 @@ async def test_a_turn_produces_the_expected_span_tree(shop, spans):
     assert "graph.node.finish" in names
     # Two model round-trips: one that asked for the tool, one that spoke.
     assert names.count("graph.node.barista") == 2
+    # Every node that touches the database is in the tree. `refresh` was the last
+    # one missing a span, which made its two queries look like they came from
+    # nowhere.
+    assert "graph.node.refresh" in names
 
 
 async def test_a_failed_tool_marks_its_own_span_only(shop, spans):

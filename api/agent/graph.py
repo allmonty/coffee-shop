@@ -103,18 +103,19 @@ async def refresh(state: BaristaState, config: RunnableConfig) -> dict[str, Any]
 
     Only the cart and wallet — the menu is fixed for the visit.
     """
-    configurable = config.get("configurable", {})
-    session = configurable["session"]
-    visit_id = uuid.UUID(str(configurable["visit_id"]))
+    with node_span("refresh"):
+        configurable = config.get("configurable", {})
+        session = configurable["session"]
+        visit_id = uuid.UUID(str(configurable["visit_id"]))
 
-    wallet = await service.get_wallet_balance(session, visit_id)
-    ended = not wallet.ok and wallet.error == "visit_closed"
+        wallet = await service.get_wallet_balance(session, visit_id)
+        ended = not wallet.ok and wallet.error == "visit_closed"
 
-    return {
-        "cart": await service.cart_payload(session, visit_id),
-        "wallet_cents": wallet.data.get("wallet_cents", state.get("wallet_cents", 0)),
-        "visit_ended": ended,
-    }
+        return {
+            "cart": await service.cart_payload(session, visit_id),
+            "wallet_cents": wallet.data.get("wallet_cents", state.get("wallet_cents", 0)),
+            "visit_ended": ended,
+        }
 
 
 async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:

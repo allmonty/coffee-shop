@@ -7,6 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
+from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select
 
 from agent.graph import build_graph
@@ -176,3 +177,50 @@ async def test_sse_buffering_is_disabled(client, session_factory, scripted):
 
     assert response.headers["x-accel-buffering"] == "no"
     assert response.headers["content-type"].startswith("text/event-stream")
+
+
+async def test_the_endpoint_remembers_the_previous_turn(client, session_factory, monkeypatch):
+    """Two POSTs, one visit: the second turn must be able to see the first.
+
+    This is the web path's version of what `scripts/shop_cli.py` has always done
+    with `open_checkpointer()`. Without a checkpointer the graph starts from an
+    empty state on every request, so "a latte" → "which size?" → "large" loses
+    the latte, and the barista is amnesiac in the browser while working fine in
+    the terminal.
+    """
+    entered = await _enter(client, session_factory)
+    model = FakeToolCallingModel([says("Which size?"), says("One large latte.")])
+    graph = build_graph(llm=model, checkpointer=InMemorySaver())
+    monkeypatch.setattr(chat_router, "get_graph", lambda: graph)
+
+    for message in ("a latte", "large"):
+        await client.post("/api/chat", json={"visit_id": entered["visit_id"], "message": message})
+
+    # What the model was handed on the second turn, minus the system prompt.
+    second_turn = [m.content for m in model.calls[1]]
+
+    assert "a latte" in second_turn  # the customer's first message survived
+    assert "Which size?" in second_turn  # and so did the barista's own reply
+
+
+def test_the_graph_is_compiled_with_the_installed_checkpointer(monkeypatch):
+    """Regression: `build_graph(checkpointer=None)` was hardcoded here.
+
+    The behavioural test above passes a graph in directly, so it cannot catch a
+    router that compiles its own graph without the store.
+    """
+    captured = {}
+
+    def fake_build_graph(llm=None, checkpointer=None):
+        captured["checkpointer"] = checkpointer
+        return object()
+
+    monkeypatch.setattr(chat_router, "build_graph", fake_build_graph)
+    saver = InMemorySaver()
+    chat_router.set_checkpointer(saver)
+    try:
+        chat_router.get_graph()
+    finally:
+        chat_router.set_checkpointer(None)
+
+    assert captured["checkpointer"] is saver

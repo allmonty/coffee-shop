@@ -245,6 +245,16 @@ exception and hands back
 `{"ok": false, "error": "invalid_arguments", "message": "..."}` so the barista
 fixes it and retries — exactly as with any other tool error.
 
+A tool name the model *invented* takes the same path (`_unknown_tool`), and the
+`message` matters just as much there: it lists the tools that do exist, so the
+model's next move is a correction rather than another guess. An envelope without
+a message would leave it to invent an explanation for the customer — the failure
+mode Stop 2 is about. It also gets a `tool.unknown` span and an
+`agent.tool.malformed` increment, because a model hallucinating tools is exactly
+what that metric is for. The span is named `unknown` rather than after the
+invented name: that string came from a language model, and model-written text in
+a span name or a metric label is unbounded cardinality.
+
 > **Try it:** `uv run pytest tests/test_graph.py -k "in_one_message or unknown_tool" -v`
 
 ---

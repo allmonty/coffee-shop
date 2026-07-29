@@ -130,6 +130,25 @@ async def test_tool_spans_record_success(shop, spans):
     assert "tool.error" not in tool.attributes
 
 
+async def test_an_invented_tool_gets_its_own_span(shop, spans):
+    """A hallucinated tool must be visible, and visible at bounded cardinality.
+
+    The span is `tool.unknown` with the requested name in an attribute: the name
+    was written by a language model, so it cannot go in a span name.
+    """
+    await shop([tool_call("teleport"), says("Sorry, what was that?")])
+
+    by_name = {span.name: span for span in spans.get_finished_spans()}
+
+    assert "tool.teleport" not in by_name
+    tool = by_name["tool.unknown"]
+    assert tool.attributes["tool.requested"] == "teleport"
+    assert tool.attributes["tool.error"] == "unknown_tool"
+    assert tool.status.status_code is StatusCode.ERROR
+    # The turn recovers from it, so the nodes around it stay clean.
+    assert by_name["graph.node.finish"].status.status_code is not StatusCode.ERROR
+
+
 async def test_loop_count_reaches_finish(shop, spans):
     """Three laps: two tool calls plus the closing reply."""
     result = await shop(

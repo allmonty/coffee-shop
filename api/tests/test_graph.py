@@ -4,6 +4,7 @@ The assertion that matters most is `test_tool_call_loops_back_to_the_barista`:
 that cycle is the agent. Everything else in the graph is setup and teardown.
 """
 
+import json
 import uuid
 
 import pytest
@@ -264,6 +265,25 @@ async def test_an_unknown_tool_name_does_not_crash_the_turn(shop):
 
     tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
     assert "unknown_tool" in tool_messages[0].content
+
+
+async def test_an_unknown_tool_comes_back_with_a_message(shop):
+    """An invented tool name is an ordinary tool failure, envelope and all.
+
+    A bare `{ok, error}` leaves the model to invent an explanation for the
+    customer, which is the one thing `Result.failure` exists to prevent. The
+    message also has to name the real tools, or the model's only repair strategy
+    is another guess.
+    """
+    run, _, _ = shop
+
+    result = await run([tool_calls(("teleport", {})), says("Sorry, what was that?")])
+
+    envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][0].content)
+
+    assert envelope == {"ok": False, "error": "unknown_tool", "message": envelope["message"]}
+    assert "teleport" in envelope["message"]
+    assert "add_to_cart" in envelope["message"]
 
 
 async def test_tools_require_injected_config(shop):

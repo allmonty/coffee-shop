@@ -121,8 +121,8 @@ async def refresh(state: BaristaState, config: RunnableConfig) -> dict[str, Any]
 async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
     """Execute this turn's tool calls **one at a time, in order**.
 
-    LangGraph's prebuilt `ToolNode` runs them concurrently, which is wrong here
-    for two reasons:
+    Hand-written rather than LangGraph's prebuilt `ToolNode` because that one runs
+    the calls concurrently, which would be wrong here twice over:
 
     1. They share one `AsyncSession`, and SQLAlchemy sessions are not safe for
        concurrent use.
@@ -131,8 +131,8 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
        run concurrently, `place_order` reads the cart before `add_to_cart` has
        committed and fails with `empty_cart`.
 
-    Found by talking to the real model — the scripted tests never emitted two
-    calls in a single message.
+    That was a real bug (`69ac67f`), found by talking to the real model — the
+    scripted tests never emitted two calls in a single message. Spec §13.7.
 
     Nothing in here may raise: a tool that throws (`invalid_arguments`) and a
     tool name the model invented (`unknown_tool`) both come back as ordinary

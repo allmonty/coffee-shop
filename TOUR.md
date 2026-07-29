@@ -292,14 +292,21 @@ $11.90 cart and got refused. A prompt rule would have silently charged.
 
 ### 2. Tool calls run sequentially (`run_tools`)
 
-LangGraph's prebuilt `ToolNode` runs a turn's tool calls **concurrently**. Wrong
-here twice over: they share one `AsyncSession` (not safe for concurrent use), and
-they're causally ordered. A model emitting `add_to_cart` + `place_order` in one
-message means "add it, *then* charge me" — run concurrently, `place_order` reads
-the cart before `add_to_cart` committed and fails with `empty_cart`.
+`run_tools` executes a turn's tool calls one at a time, in the order the model
+emitted them. That is the current, correct behaviour — read on for why it is worth
+a hand-written node.
 
-Every scripted test emitted one call per turn, so the suite was green while the
-real thing was broken.
+The obvious alternative is LangGraph's prebuilt `ToolNode`, which runs a turn's
+calls **concurrently**. That would be wrong here twice over: they share one
+`AsyncSession` (not safe for concurrent use), and they're causally ordered. A
+model emitting `add_to_cart` + `place_order` in one message means "add it, *then*
+charge me"; run concurrently, `place_order` reads the cart before `add_to_cart`
+committed and fails with `empty_cart`.
+
+The concurrent version did ship once (`69ac67f`, bug 1 below) and was caught by
+talking to the real model, not by the suite: every scripted test emitted one call
+per turn, so CI stayed green while the real thing was broken. The spec records the
+decision and its rejected alternative in §13.7.
 
 ### 3. A malformed tool call returns an envelope, never raises
 

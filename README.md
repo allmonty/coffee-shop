@@ -1,5 +1,9 @@
 # Coffee Shop
 
+<p>
+<img width="2816" height="1536" alt="Gemini_Generated_Image_b3hu2pb3hu2pb3hu" src="https://github.com/user-attachments/assets/fbd6aceb-cd49-46b7-aef6-3dc33e8586cc" />
+</p>
+
 A virtual coffee shop where you order from an LLM barista by typing. Built to
 learn **agentic architecture**: LangGraph, tool-calling, agent state, a local
 model — with a deliberately small domain so the interesting complexity stays in

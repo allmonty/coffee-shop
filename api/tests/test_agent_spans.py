@@ -164,3 +164,48 @@ async def test_loop_count_reaches_finish(shop, spans):
     )
 
     assert result["loop_count"] == 3
+
+
+async def test_summarizing_a_visit_gets_its_own_root_span(spans, session):
+    """Spec §6.5.1 specified this span; it did not exist until §13.10.
+
+    Root, not a child of the turn: it runs after the SSE stream closes, by which
+    point `agent.turn` has already ended. It is a separate agent task on its own
+    budget and the trace has to say so.
+    """
+    from agent.summarize import summarize_visit
+
+    await seed_catalog(session)
+    user_id = uuid.UUID((await enter(session, "Spanner")).data["user_id"])
+
+    await summarize_visit(
+        session,
+        user_id,
+        [HumanMessage(content="I have just started a new job")],
+        llm=FakeToolCallingModel([says('["mentioned starting a new job"]')]),
+    )
+
+    summarize = [s for s in spans.get_finished_spans() if s.name == "agent.summarize_visit"]
+    assert len(summarize) == 1
+    assert summarize[0].parent is None
+    assert summarize[0].attributes["summarize.note_count"] == 1
+
+
+async def test_the_summarize_span_names_the_model_that_ran(spans, session):
+    """Otherwise "did the small model actually run" is unanswerable."""
+    from agent.summarize import summarize_visit
+
+    await seed_catalog(session)
+    user_id = uuid.UUID((await enter(session, "Spanner")).data["user_id"])
+
+    await summarize_visit(
+        session,
+        user_id,
+        [HumanMessage(content="hello")],
+        llm=FakeToolCallingModel([says("[]")]),
+    )
+
+    span = next(s for s in spans.get_finished_spans() if s.name == "agent.summarize_visit")
+    assert "gen_ai.request.model" in span.attributes
+    # Nothing stood out is a normal outcome, and must still be visible.
+    assert span.attributes["summarize.note_count"] == 0

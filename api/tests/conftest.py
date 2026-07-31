@@ -106,7 +106,7 @@ def _migrate(url: str) -> None:
 
 
 ALL_TABLES = (
-    "users, menu_items, size_modifiers, visits, visit_menu_items, carts, "
+    "users, menu_items, size_modifiers, drink_modifiers, visits, visit_menu_items, carts, "
     "cart_lines, orders, order_lines, messages, customer_preferences"
 )
 

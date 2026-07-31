@@ -27,5 +27,15 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "qwen2.5:14b-instruct"
 
+    # Summarizing a finished visit is a different job from holding a
+    # conversation: no tools, no rules to follow, one short structured answer.
+    # It can take a smaller, faster model (spec §13.10).
+    #
+    # Unset means "use ollama_model", which is what shipped before this existed.
+    # It is deliberately not defaulted to a small model: summarize_visit never
+    # raises, so anyone who had not pulled that model would get notes that
+    # silently stopped being written.
+    ollama_summary_model: str | None = None
+
 
 settings = Settings()

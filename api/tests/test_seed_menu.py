@@ -1,14 +1,14 @@
 from sqlalchemy import func, select
 
-from shop.catalog_data import DRINKS, FOODS, SIZE_DELTAS
-from shop.models import MenuItem, SizeModifier
+from shop.catalog_data import DRINKS, FOODS, MODIFIERS, SIZE_DELTAS
+from shop.models import DrinkModifier, MenuItem, SizeModifier
 from shop.seed import seed_catalog
 
 
 async def test_seed_inserts_the_whole_catalog(session):
     added = await seed_catalog(session)
 
-    assert added == len(DRINKS) + len(FOODS) + len(SIZE_DELTAS)
+    assert added == len(DRINKS) + len(FOODS) + len(SIZE_DELTAS) + len(MODIFIERS)
 
     drinks = await session.scalar(
         select(func.count()).select_from(MenuItem).where(MenuItem.category == "drink")
@@ -51,6 +51,36 @@ async def test_size_deltas_are_flat_and_ordered(session):
     deltas = {m.size: m.delta_cents for m in (await session.scalars(select(SizeModifier))).all()}
 
     assert deltas == {"small": 0, "medium": 60, "large": 120}
+
+
+async def test_modifier_prices_match_the_spec(session):
+    """Spec §3.6: oat and almond +$0.60, extra shot +$1.00."""
+    await seed_catalog(session)
+
+    rows = (await session.scalars(select(DrinkModifier))).all()
+    deltas = {row.code: row.delta_cents for row in rows}
+
+    assert deltas == {"whole_milk": 0, "oat_milk": 60, "almond_milk": 60, "extra_shot": 100}
+
+
+async def test_whole_milk_is_free_and_the_default(session):
+    """It is the drink as listed, so it has to canonicalize out of the key."""
+    await seed_catalog(session)
+
+    whole = await session.get(DrinkModifier, "whole_milk")
+
+    assert (whole.delta_cents, whole.is_default) == (0, True)
+
+
+async def test_the_two_milks_share_an_exclusive_group(session):
+    """What makes `modifier_conflict` possible without a hardcoded pair."""
+    await seed_catalog(session)
+
+    rows = (await session.scalars(select(DrinkModifier))).all()
+    groups = {row.code: row.exclusive_group for row in rows}
+
+    assert groups["oat_milk"] == groups["almond_milk"] == "milk"
+    assert groups["extra_shot"] is None
 
 
 async def test_seed_leaves_edited_prices_alone(session):

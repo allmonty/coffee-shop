@@ -20,21 +20,18 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from agent.delegates import WAITER_TOOLS, set_models
+from agent.dispatch import execute_tool_call
 from agent.instrumentation import (
     loop_iterations,
     node_span,
     record_llm_call,
-    record_tool_call,
-    record_tool_result,
-    tool_malformed,
-    tool_span,
 )
 from agent.llm import build_llm
 from agent.prompts import system_prompt
 from agent.state import BaristaState
-from agent.tools import ALL_TOOLS, TOOLS_BY_NAME
 from shop import service
-from shop.pricing import load_size_deltas
+from shop.pricing import load_deltas
 from shop.profile import customer_profile
 
 
@@ -61,13 +58,15 @@ async def _load_context(state: BaristaState, config: RunnableConfig) -> dict[str
     # SQLAlchemy model. agent/ imports shop.service and nothing else from the
     # domain — that is the §5.1 boundary, and it is easy to breach by accident.
     wallet = await service.get_wallet_balance(session, visit_id)
+    deltas = await load_deltas(session)
 
     return {
         "user_id": str(user_id),
         "visit_id": str(visit_id),
         "customer_profile": await customer_profile(session, user_id, visit_id),
         "menu": await service.todays_menu(session, visit_id),
-        "size_deltas": await load_size_deltas(session),
+        "size_deltas": deltas.size,
+        "modifier_deltas": deltas.offerable(),
         "cart": await service.cart_payload(session, visit_id),
         "wallet_cents": wallet.data.get("wallet_cents", 0),
         "day": wallet.data.get("day", 1),
@@ -80,7 +79,7 @@ async def _load_context(state: BaristaState, config: RunnableConfig) -> dict[str
 
 def make_barista(llm):
     """The LLM call. `llm` is injected so tests can pass a scripted fake."""
-    model = llm.bind_tools(ALL_TOOLS)
+    model = llm.bind_tools(WAITER_TOOLS)
 
     async def barista(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
         with node_span("barista") as span:
@@ -141,40 +140,29 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
     """
     last = state["messages"][-1]
     results: list[ToolMessage] = []
+    registry = {t.name: t for t in WAITER_TOOLS}
+
+    # Sub-agents need the live menu, cart and wallet to build their own prompts,
+    # and they are reached through a tool, so state travels the same way session
+    # and visit_id do rather than through a closure.
+    config = {
+        **(config or {}),
+        "configurable": {**((config or {}).get("configurable") or {}), "agent_state": dict(state)},
+    }
+
+    steps: dict[str, list] = {}
 
     with node_span("tools"):
         for call in last.tool_calls:
-            tool = TOOLS_BY_NAME.get(call["name"])
-            if tool is None:
-                results.append(
-                    ToolMessage(
-                        content=json.dumps(_unknown_tool(call)),
-                        tool_call_id=call["id"],
-                        name=call["name"],
-                    )
-                )
-                continue
-
-            with tool_span(call["name"]) as span:
-                record_tool_call(call["name"], call["args"])
-                try:
-                    payload = await tool.ainvoke({**call["args"]}, config)
-                except Exception as error:
-                    # A malformed tool call must never crash the turn. Small
-                    # models drop required arguments constantly; handing the
-                    # problem back as an ordinary envelope lets the barista fix
-                    # it and retry, which is what it does with any tool error.
-                    payload = {
-                        "ok": False,
-                        "error": "invalid_arguments",
-                        "message": (
-                            f"That call to {call['name']} was missing something: {error}. "
-                            "Check the arguments and try again."
-                        ),
-                    }
-                    tool_malformed.add(1, {"reason": "invalid_arguments"})
-                record_tool_result(span, call["name"], payload)
-
+            payload = await execute_tool_call(call, registry, config)
+            # A delegation's own tool calls go to state, not into the message.
+            # The ToolMessage's content IS the waiter's context, and a sub-agent
+            # that read the menu and added a drink would otherwise re-enter that
+            # context on every subsequent turn (spec §13.11).
+            if payload.get("steps"):
+                steps[call["id"]] = payload.pop("steps")
+            else:
+                payload.pop("steps", None)
             results.append(
                 ToolMessage(
                     content=json.dumps(payload),
@@ -183,42 +171,7 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
                 )
             )
 
-    return {"messages": results}
-
-
-def _unknown_tool(call: dict[str, Any]) -> dict[str, Any]:
-    """An invented tool name is an ordinary tool failure, so treat it as one.
-
-    Two things this must do that the earlier bare `{ok, error}` did not:
-
-    1. **Carry a `message`.** Every envelope does (spec §6.4). Without one the
-       model has nothing to work from and invents an explanation for the
-       customer — the same failure mode `Result.failure` refuses to allow.
-    2. **Leave a trace.** It gets a tool span and counts towards
-       `agent.tool.malformed`, whose whole purpose is "unparseable or *invented*
-       tool calls" — the invented half was never being counted, so a model
-       hallucinating tools looked like a healthy turn on the dashboard.
-
-    The span and metric use the fixed name `unknown`, with the requested name in
-    an attribute: the name came from a language model, and putting it in a span
-    name or a metric label is unbounded cardinality (§9.3).
-    """
-    payload = {
-        "ok": False,
-        "error": "unknown_tool",
-        "message": (
-            f"There is no {call['name']} tool. The tools you have are: "
-            f"{', '.join(TOOLS_BY_NAME)}. Use one of those, or just answer in words."
-        ),
-    }
-
-    with tool_span("unknown") as span:
-        span.set_attribute("tool.requested", call["name"])
-        record_tool_call(call["name"], call.get("args") or {})
-        record_tool_result(span, "unknown", payload)
-        tool_malformed.add(1, {"reason": "unknown_tool"})
-
-    return payload
+    return {"messages": results, "delegation_steps": steps}
 
 
 def route_after_barista(state: BaristaState) -> str:
@@ -240,12 +193,19 @@ async def finish(state: BaristaState) -> dict[str, Any]:
         return {}
 
 
-def build_graph(llm=None, checkpointer=None):
-    """Wiring only — no business logic in this function."""
+def build_graph(llm=None, checkpointer=None, barista_llm=None, cashier_llm=None):
+    """Wiring only — no business logic in this function.
+
+    Three models, defaulting to the same one. Tests inject three scripted fakes
+    so a delegation is as deterministic as any other tool call.
+    """
+    waiter = llm or build_llm()
+    set_models(barista=barista_llm or waiter, cashier=cashier_llm or waiter)
+
     graph = StateGraph(BaristaState)
 
     graph.add_node("load_context", load_context)
-    graph.add_node("barista", make_barista(llm or build_llm()))
+    graph.add_node("barista", make_barista(waiter))
     graph.add_node("tools", run_tools)
     graph.add_node("refresh", refresh)
     graph.add_node("finish", finish)

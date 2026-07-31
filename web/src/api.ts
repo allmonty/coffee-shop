@@ -16,9 +16,31 @@ export type MenuItem = {
 export type CartLine = {
   item: string;
   size: string | null;
+  modifiers: string[];
   quantity: number;
   unit_price_cents: number;
   line_total_cents: number;
+};
+
+/** One thing the agent did, paired call-to-result. `steps` holds a delegation's
+ *  own tool calls, which never reach the graph's message list. */
+export type ToolResult = {
+  tool: string;
+  args: Record<string, unknown>;
+  ok: boolean;
+  error: string | null;
+  message: string | null;
+  agent: string | null;
+  steps: ToolResult[];
+};
+
+export type Profile = {
+  name: string;
+  visit_count: number;
+  favorite_drink: string | null;
+  favorite_food: string | null;
+  last_visit_day: number | null;
+  notes: string[];
 };
 
 export type Cart = { lines: CartLine[]; total_cents: number };
@@ -39,6 +61,9 @@ export type Frame =
   | { type: "cart_updated"; lines: CartLine[]; total_cents: number }
   | { type: "wallet_updated"; wallet_cents: number }
   | { type: "visit_ended"; day: number; wallet_cents: number }
+  | ({ type: "tool_result" } & ToolResult)
+  | { type: "reset_reply" }
+  | { type: "turn_stats"; loop_count: number }
   | { type: "done"; visit_ended: boolean }
   | { type: "error"; error: string; detail?: string };
 
@@ -56,6 +81,16 @@ export async function enterShop(name: string): Promise<EnterResponse> {
     const body = await response.json().catch(() => ({}));
     throw new Error(body?.detail?.message ?? "Could not open the door.");
   }
+  return response.json();
+}
+
+/**
+ * What Sam remembers. Notes are written when a visit ends, so this is empty on a
+ * first visit and fills in from the next day on.
+ */
+export async function fetchProfile(userId: string): Promise<Profile | null> {
+  const response = await fetch(`/api/users/${userId}/profile`);
+  if (!response.ok) return null;
   return response.json();
 }
 

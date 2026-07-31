@@ -106,6 +106,12 @@ async def turn(session, graph, user_id, visit_id, **kwargs) -> bool:
         if frame["type"] == "token":
             print(frame["text"], end="", flush=True)
             saw_text = True
+        elif frame["type"] == "reset_reply":
+            # The model narrated its own tool call before it had the result.
+            # The browser drops that text; erase the line so the terminal shows
+            # the same conversation the customer would see.
+            print("\r\033[2K", end="", flush=True)
+            saw_text = False
         elif frame["type"] == "cart_updated" and frame.get("lines"):
             total = format_cents(frame.get("total_cents", 0))
             print(f"\n{DIM}   [cart: {len(frame['lines'])} line(s), {total}]{RESET}", end="")

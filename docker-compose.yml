@@ -47,6 +47,8 @@ services:
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:14b-instruct}
+      # Unset falls back to OLLAMA_MODEL. See .env.example before setting it.
+      OLLAMA_SUMMARY_MODEL: ${OLLAMA_SUMMARY_MODEL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

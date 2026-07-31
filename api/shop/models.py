@@ -91,6 +91,30 @@ class SizeModifier(Base):
     delta_cents: Mapped[int] = mapped_column(Integer)
 
 
+class DrinkModifier(Base):
+    """Four rows. Same instinct as SizeModifier: modifier pricing lives in the
+    database like every other price (spec §3.6).
+
+    Deliberately not referenced by a foreign key from the lines. A line stores a
+    canonical comma-joined key of codes so that line identity stays one row and
+    one plain unique constraint (see CartLine); the price of validating a code
+    is therefore a domain error in `add_to_cart`, not an IntegrityError.
+    """
+
+    __tablename__ = "drink_modifiers"
+    __table_args__ = (CheckConstraint("code ~ '^[a-z_]+$'", name="ck_drink_modifiers_code_format"),)
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    delta_cents: Mapped[int] = mapped_column(Integer)
+    # Two codes from one group cannot share a cup: oat or almond, not both.
+    exclusive_group: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # The drink as listed. Canonicalizes away, so "a latte" and "a latte with
+    # regular milk" are one line rather than two.
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Retire a modifier without breaking carts or history, as MenuItem.in_catalog.
+    available: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Visit(Base):
     __tablename__ = "visits"
     __table_args__ = (
@@ -148,6 +172,13 @@ class CartLine(Base):
     composite foreign key so it cannot disagree, then CHECK size against it
     locally. The result is that the database rejects a sized food line and a
     sizeless drink line — no trigger, no application-layer trust (spec §8).
+
+    `modifiers` reuses that same flag one axis over, so an oat milk cookie is
+    unrepresentable for exactly the same reason a large cookie is. It holds the
+    canonical key built by `shop.modifiers.canonical_key` — sorted, deduped,
+    comma-joined codes, empty string for none — rather than a child table,
+    because line identity is (item, size, modifier set) and a unique constraint
+    cannot aggregate over a child table (spec §13, decision 8).
     """
 
     __tablename__ = "cart_lines"
@@ -162,7 +193,23 @@ class CartLine(Base):
             name="ck_cart_lines_size_value",
         ),
         CheckConstraint("sized = (size IS NOT NULL)", name="ck_cart_lines_size_matches_item"),
-        UniqueConstraint("cart_id", "menu_item_id", "size", name="uq_cart_lines_item_size"),
+        CheckConstraint("sized OR modifiers = ''", name="ck_cart_lines_modifiers_drinks_only"),
+        CheckConstraint(
+            "modifiers = '' OR modifiers ~ '^[a-z_]+(,[a-z_]+)*$'",
+            name="ck_cart_lines_modifiers_format",
+        ),
+        # coalesce(size, '') rather than the bare column: NULLs are distinct in a
+        # UNIQUE constraint, so the old (cart, item, size) constraint never bound
+        # food lines at all — two identical croissant rows were DB-legal and only
+        # the app-level lookup prevented them.
+        Index(
+            "uq_cart_lines_item_size_modifiers",
+            "cart_id",
+            "menu_item_id",
+            text("coalesce(size, '')"),
+            "modifiers",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -172,6 +219,9 @@ class CartLine(Base):
     # NULL means "this item has no size", which is a different fact from small.
     size: Mapped[str | None] = mapped_column(String(10), nullable=True)
     sized: Mapped[bool] = mapped_column(Boolean)
+    modifiers: Mapped[str] = mapped_column(
+        String(120), nullable=False, server_default="", default=""
+    )
 
 
 class Order(Base):
@@ -205,6 +255,11 @@ class OrderLine(Base):
             name="ck_order_lines_size_value",
         ),
         CheckConstraint("sized = (size IS NOT NULL)", name="ck_order_lines_size_matches_item"),
+        CheckConstraint("sized OR modifiers = ''", name="ck_order_lines_modifiers_drinks_only"),
+        CheckConstraint(
+            "modifiers = '' OR modifiers ~ '^[a-z_]+(,[a-z_]+)*$'",
+            name="ck_order_lines_modifiers_format",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -213,7 +268,10 @@ class OrderLine(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     size: Mapped[str | None] = mapped_column(String(10), nullable=True)
     sized: Mapped[bool] = mapped_column(Boolean)
-    # Snapshot of base + size delta at the time of the order.
+    modifiers: Mapped[str] = mapped_column(
+        String(120), nullable=False, server_default="", default=""
+    )
+    # Snapshot of base + size delta + modifier deltas at the time of the order.
     unit_price_cents: Mapped[int] = mapped_column(Integer)
 
 

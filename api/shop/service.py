@@ -11,6 +11,7 @@ is the map. It has no idea an LLM exists.
 from shop.cart import (
     add_to_cart,
     cart_payload,
+    change_modifiers,
     change_size,
     get_cart,
     remove_from_cart,
@@ -39,6 +40,7 @@ __all__ = [
     # cart
     "add_to_cart",
     "cart_payload",
+    "change_modifiers",
     "change_size",
     "get_cart",
     "remove_from_cart",

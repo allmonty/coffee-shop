@@ -67,6 +67,17 @@ size_clarifications = _meter.create_counter(
     "agent.size_clarifications",
     description="Drinks ordered without a size. Falls as the profile learns someone.",
 )
+delegations = _meter.create_counter(
+    "agent.delegations",
+    description="Times the waiter handed a job to a sub-agent. Label `to` is a "
+    "fixed set (barista|cashier) — never a model-written string (spec §13.11).",
+)
+delegation_laps = _meter.create_histogram(
+    "agent.delegation.laps",
+    description="Tool laps inside one delegation. Makes a runaway sub-agent "
+    "visible the way agent.loop.iterations makes a runaway waiter visible.",
+)
+
 llm_tokens = _meter.create_counter("llm.tokens", description="Prompt and completion tokens.")
 llm_duration = _meter.create_histogram("llm.request.duration", unit="ms")
 
@@ -100,6 +111,25 @@ def turn_span(visit_id: str, user_id: str, day: int | None = None):
             elapsed = (time.monotonic() - started) * 1000
             turn_duration.record(elapsed)
             logger.info("turn.end", extra={"duration_ms": round(elapsed)})
+
+
+@contextmanager
+def summarize_span(user_id: str, model: str):
+    """The visit-summarization pass (spec §6.5.1).
+
+    Its own root span, not a child of the turn: it runs *after* the SSE stream
+    closes, by which point `agent.turn` is already ended. It is a separate agent
+    task on its own budget, and the trace should say so.
+
+    `model` is an attribute because the summarizer can run on a smaller model
+    than the barista (§13.10), and "did the small one actually run" is otherwise
+    unanswerable.
+    """
+    with tracer.start_as_current_span("agent.summarize_visit") as span:
+        span.set_attribute("gen_ai.request.model", model)
+        span.set_attribute("user.id", user_id)
+        logger.info("summarize.start", extra={"summary_model": model})
+        yield span
 
 
 @contextmanager

@@ -17,6 +17,17 @@ from langchain_openai import ChatOpenAI
 from settings import settings
 
 
+def build_summary_llm(**overrides) -> ChatOpenAI:
+    """The model for the visit-summarization pass (spec §6.5.1).
+
+    Falls back to the conversation model when `OLLAMA_SUMMARY_MODEL` is unset,
+    so the default behaviour is exactly what it was before this existed.
+    """
+    if settings.ollama_summary_model:
+        overrides.setdefault("model", settings.ollama_summary_model)
+    return build_llm(**overrides)
+
+
 def build_llm(**overrides) -> ChatOpenAI:
     kwargs = {
         "model": settings.ollama_model,

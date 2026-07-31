@@ -5,7 +5,16 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from shop.models import MenuItem, Order, OrderLine, SizeModifier, User, Visit, VisitMenuItem
+from shop.models import (
+    DrinkModifier,
+    MenuItem,
+    Order,
+    OrderLine,
+    SizeModifier,
+    User,
+    Visit,
+    VisitMenuItem,
+)
 from shop.seed import seed_catalog
 from shop.service import (
     add_to_cart,
@@ -147,6 +156,23 @@ async def test_order_lines_snapshot_the_price_actually_charged(shop):
     assert line.quantity == 2
 
 
+async def test_order_lines_snapshot_the_modifier_surcharge(shop):
+    """Same guarantee, same mechanism, one axis over: editing drink_modifiers
+    later must not rewrite what a customer was charged."""
+    session, visit_id, _ = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])  # 580
+
+    await place_order(session, visit_id, confirmed_total_cents=580)
+
+    oat = await session.get(DrinkModifier, "oat_milk")
+    oat.delta_cents = 999
+    await session.commit()
+
+    line = await session.scalar(select(OrderLine))
+    assert line.unit_price_cents == 580
+    assert line.modifiers == "oat_milk"
+
+
 async def test_multiple_orders_in_one_visit(shop):
     session, visit_id, user_id = shop
 
@@ -236,6 +262,7 @@ async def test_order_history_records_sizes(shop):
     assert history[0]["lines"][0] == {
         "item": "Latte",
         "size": "large",
+        "modifiers": [],
         "quantity": 1,
         "unit_price_cents": 520,
     }

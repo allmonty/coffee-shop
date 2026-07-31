@@ -232,3 +232,214 @@ async def test_get_cart_on_an_empty_cart(shop):
 
     assert result.ok is True
     assert result.data == {"lines": [], "total_cents": 0}
+
+
+# --- modifiers (spec §3.6) -------------------------------------------------
+#
+# The mirror image of sizes: optional rather than required, so there is no
+# `modifier_required`. A modifier request can only be over-specified, never
+# under-specified.
+
+
+async def test_add_a_drink_with_a_modifier_charges_the_surcharge(shop):
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+
+    assert result.ok is True
+    assert result.data["total_cents"] == 580  # 400 base + 120 large + 60 oat
+
+
+async def test_two_modifiers_stack_on_one_line(shop):
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk", "extra_shot"])
+
+    assert result.data["total_cents"] == 680
+
+
+async def test_same_drink_and_modifiers_twice_stacks_onto_one_line(shop):
+    session, visit_id = shop
+
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+
+    assert len(result.data["lines"]) == 1
+    assert result.data["lines"][0]["quantity"] == 2
+
+
+async def test_modifier_order_does_not_create_a_second_line(shop):
+    """The canonicalisation proof, at the service level."""
+    session, visit_id = shop
+
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk", "extra_shot"])
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["extra_shot", "oat_milk"])
+
+    assert len(result.data["lines"]) == 1
+    assert result.data["lines"][0]["quantity"] == 2
+
+
+async def test_same_drink_with_different_modifiers_is_two_lines(shop):
+    session, visit_id = shop
+
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["extra_shot"])
+
+    assert len(result.data["lines"]) == 2
+    assert result.data["total_cents"] == 580 + 620
+
+
+async def test_whole_milk_is_the_same_line_as_no_modifier(shop):
+    """Whole milk is the drink as listed, so it must not split the line."""
+    session, visit_id = shop
+
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["whole_milk"])
+
+    assert len(result.data["lines"]) == 1
+    assert result.data["total_cents"] == 1040
+
+
+async def test_food_with_a_modifier_is_rejected(shop):
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Croissant", 1, None, ["oat_milk"])
+
+    assert result.error == "modifier_not_applicable"
+
+
+async def test_unknown_modifier_asks_which_one(shop):
+    """Not a dead end: the message is the question the barista reads aloud."""
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["soy_milk"])
+
+    assert result.error == "unknown_modifier"
+    assert result.message.endswith("?")
+
+
+async def test_two_milks_in_one_cup_are_rejected(shop):
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk", "almond_milk"])
+
+    assert result.error == "modifier_conflict"
+
+
+async def test_size_is_asked_before_an_unknown_modifier_is_judged(shop):
+    """`size_required` is the only branch that asks a question, so it comes first.
+
+    "a latte with soy" should come back "which size?", letting the model retry
+    knowing both facts rather than fixing one problem at a time.
+    """
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Latte", 1, None, ["soy_milk"])
+
+    assert result.error == "size_required"
+
+
+async def test_a_bad_size_is_reported_before_a_bad_modifier(shop):
+    """The same ordering seen from the other side."""
+    session, visit_id = shop
+
+    result = await add_to_cart(session, visit_id, "Croissant", 1, "large", ["oat_milk"])
+
+    assert result.error == "size_not_applicable"
+
+
+async def test_remove_picks_the_line_by_modifiers(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["extra_shot"])
+
+    result = await remove_from_cart(session, visit_id, "Latte", "large", None, ["oat_milk"])
+
+    assert result.ok is True
+    assert len(result.data["lines"]) == 1
+    assert result.data["lines"][0]["modifiers"] == ["extra_shot"]
+
+
+async def test_remove_asks_which_modifier_when_ambiguous(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await remove_from_cart(session, visit_id, "Latte", "large")
+
+    assert result.error == "modifier_ambiguous"
+    assert "plain" in result.message
+
+
+async def test_remove_asks_which_size_first_when_both_differ(shop):
+    """One question at a time, and size is the coarser one."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+    await add_to_cart(session, visit_id, "Latte", 1, "small")
+
+    result = await remove_from_cart(session, visit_id, "Latte")
+
+    assert result.error == "size_ambiguous"
+
+
+async def test_remove_with_an_empty_modifier_list_does_not_filter(shop):
+    """`[]` means "nothing to say about extras", not "the plain one".
+
+    Reading it as a filter would delete the wrong line whenever a model padded
+    the call with an empty list.
+    """
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+
+    result = await remove_from_cart(session, visit_id, "Latte", "large", None, [])
+
+    assert result.ok is True
+    assert result.data["lines"] == []
+
+
+async def test_change_size_keeps_the_modifiers(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "small", ["oat_milk"])
+
+    result = await change_size(session, visit_id, "Latte", "small", "large")
+
+    assert result.ok is True
+    assert result.data["lines"][0]["modifiers"] == ["oat_milk"]
+    assert result.data["total_cents"] == 580
+
+
+async def test_change_size_quotes_only_the_size_difference(shop):
+    """The modifier surcharge is on both sides and cancels."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "small", ["oat_milk"])
+
+    result = await change_size(session, visit_id, "Latte", "small", "large")
+
+    assert result.data["difference_cents"] == 120
+
+
+async def test_change_size_merges_only_into_a_line_with_the_same_modifiers(shop):
+    """The 60c-loss guard.
+
+    Merging an oat latte into a plain one would charge the plain price and pass
+    every test written before modifiers existed.
+    """
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "small", ["oat_milk"])
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await change_size(session, visit_id, "Latte", "small", "large")
+
+    assert len(result.data["lines"]) == 2
+    assert result.data["total_cents"] == 520 + 580
+
+
+async def test_change_size_asks_which_when_two_modifier_variants_exist(shop):
+    """`.scalar()` would have silently resized an arbitrary one."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "small", ["oat_milk"])
+    await add_to_cart(session, visit_id, "Latte", 1, "small")
+
+    result = await change_size(session, visit_id, "Latte", "small", "large")
+
+    assert result.error == "modifier_ambiguous"

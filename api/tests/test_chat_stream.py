@@ -46,8 +46,12 @@ async def client(session_factory):
 
 @pytest.fixture
 def scripted(monkeypatch):
-    def install(script):
-        graph = build_graph(llm=FakeToolCallingModel(script))
+    def install(script, cashier=None, barista=None):
+        graph = build_graph(
+            llm=FakeToolCallingModel(script),
+            cashier_llm=FakeToolCallingModel(cashier) if cashier is not None else None,
+            barista_llm=FakeToolCallingModel(barista) if barista is not None else None,
+        )
         monkeypatch.setattr(chat_router, "get_graph", lambda: graph)
 
     return install
@@ -110,9 +114,10 @@ async def test_wallet_updates_after_an_order(client, session_factory, scripted):
     scripted(
         [
             tool_call("add_to_cart", item_name="Latte", quantity=1, size="small"),
-            tool_call("place_order", confirmed_total_cents=400),
+            tool_call("ring_up", request="charge them", quoted_total_cents=400),
             says("Enjoy."),
-        ]
+        ],
+        cashier=[tool_call("charge_the_customer"), says("Paid.")],
     )
 
     response = await client.post(
@@ -125,7 +130,10 @@ async def test_wallet_updates_after_an_order(client, session_factory, scripted):
 
 async def test_going_home_ends_the_visit(client, session_factory, scripted):
     entered = await _enter(client, session_factory)
-    scripted([tool_call("end_visit", confirmed=True), says("See you tomorrow.")])
+    scripted(
+        [tool_call("ring_up", request="they are off", going_home=True), says("See you tomorrow.")],
+        cashier=[tool_call("send_them_home"), says("Night.")],
+    )
 
     response = await client.post(
         "/api/chat", json={"visit_id": entered["visit_id"], "event": "go_home"}
@@ -224,3 +232,235 @@ def test_the_graph_is_compiled_with_the_installed_checkpointer(monkeypatch):
         chat_router.set_checkpointer(None)
 
     assert captured["checkpointer"] is saver
+
+
+async def test_the_decision_record_reaches_the_browser(client, session_factory, scripted):
+    """What the agent did, paired call-to-result, in the same stream as the prose."""
+    entered = await _enter(client, session_factory)
+    scripted(
+        [
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            says("One large latte."),
+        ]
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "a large latte"}
+    )
+
+    results = [f for f in frames(response.text) if f["type"] == "tool_result"]
+    assert len(results) == 1
+    assert results[0]["tool"] == "add_to_cart"
+    assert results[0]["args"]["size"] == "large"
+    assert results[0]["ok"] is True
+    assert results[0]["steps"] == []
+
+
+async def test_a_failed_tool_shows_its_error_and_message(client, session_factory, scripted):
+    """The panel has to show refusals — they are the interesting half."""
+    entered = await _enter(client, session_factory)
+    scripted(
+        [
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            tool_call("ring_up", request="charge them", quoted_total_cents=620),
+            says("Sorry, my mistake — it's $5.20."),
+        ],
+        cashier=[tool_call("charge_the_customer"), says("Wrong total.")],
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "a large latte, pay now"}
+    )
+
+    refused = [f for f in frames(response.text) if f["type"] == "tool_result" and not f["ok"]]
+    assert len(refused) == 1
+    # The refusal happened inside the delegation, and must still surface as a
+    # failed ring_up — otherwise the waiter announces an order nobody paid for.
+    assert refused[0]["tool"] == "ring_up"
+    assert refused[0]["error"] == "total_mismatch"
+    step = refused[0]["steps"][-1]
+    assert step["tool"] == "charge_the_customer"
+    assert "5.20" in step["message"]
+
+
+async def test_each_tool_result_is_reported_exactly_once(client, session_factory, scripted):
+    """A values snapshot arrives per node, so the naive version repeats itself."""
+    entered = await _enter(client, session_factory)
+    scripted(
+        [
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            tool_call("add_to_cart", item_name="Chocolate Chip Cookie", quantity=1),
+            says("Done."),
+        ]
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "latte and a cookie"}
+    )
+
+    results = [f for f in frames(response.text) if f["type"] == "tool_result"]
+    assert len(results) == 2
+
+
+async def test_the_turn_reports_how_many_model_calls_it_cost(client, session_factory, scripted):
+    """Two inferences for one sentence is invisible without this."""
+    entered = await _enter(client, session_factory)
+    scripted(
+        [
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            says("One large latte."),
+        ]
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "a large latte"}
+    )
+
+    stats = [f for f in frames(response.text) if f["type"] == "turn_stats"]
+    assert stats[0]["loop_count"] == 2
+
+
+async def test_a_later_turn_does_not_replay_earlier_tool_calls(
+    client, session_factory, monkeypatch
+):
+    """`messages` is the whole checkpointed thread, not this turn's slice.
+
+    Without seeding from the first snapshot, turn two re-reports turn one's
+    calls as if they had just happened — and a one-turn probe cannot show it.
+    """
+    entered = await _enter(client, session_factory)
+    graph = build_graph(
+        llm=FakeToolCallingModel(
+            [
+                tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+                says("One large latte."),
+                tool_call("add_to_cart", item_name="Chocolate Chip Cookie", quantity=1),
+                says("And a cookie."),
+            ]
+        ),
+        checkpointer=InMemorySaver(),
+    )
+    monkeypatch.setattr(chat_router, "get_graph", lambda: graph)
+
+    first = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "a large latte"}
+    )
+    second = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "a cookie too"}
+    )
+
+    assert [f["tool"] for f in frames(first.text) if f["type"] == "tool_result"] == ["add_to_cart"]
+    reported = [f for f in frames(second.text) if f["type"] == "tool_result"]
+    assert len(reported) == 1
+    assert reported[0]["args"]["item_name"] == "Chocolate Chip Cookie"
+
+
+async def test_a_delegations_internal_calls_reach_the_browser(client, session_factory, scripted):
+    """Otherwise ask_barista is an opaque box in the one panel meant to show
+    what happened."""
+    entered = await _enter(client, session_factory)
+    scripted(
+        [tool_call("ask_barista", request="a large latte with oat"), says("Coming up.")],
+        barista=[
+            tool_call(
+                "add_to_cart", item_name="Latte", quantity=1, size="large", modifiers=["oat_milk"]
+            ),
+            says("In."),
+        ],
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "large oat latte"}
+    )
+
+    results = [f for f in frames(response.text) if f["type"] == "tool_result"]
+    assert [f["tool"] for f in results] == ["ask_barista"]
+    assert results[0]["agent"] == "barista"
+    assert [step["tool"] for step in results[0]["steps"]] == ["add_to_cart"]
+    assert results[0]["steps"][0]["agent"] == "barista"
+
+
+async def test_the_go_home_button_still_ends_the_visit(client, session_factory, scripted):
+    """The path that lost its tool.
+
+    The Go Home button is a first-class control and the waiter no longer has
+    end_visit, so this turn now has to route through Val.
+    """
+    entered = await _enter(client, session_factory)
+    scripted(
+        [tool_call("ring_up", request="they pressed Go Home", going_home=True), says("Night!")],
+        cashier=[tool_call("send_them_home"), says("Closed out.")],
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "event": "go_home"}
+    )
+
+    assert any(f["type"] == "visit_ended" for f in frames(response.text))
+
+
+async def test_a_premature_reply_is_withdrawn_before_the_real_one(
+    client, session_factory, scripted
+):
+    """Models talk in the same message as a tool call, and both reach the
+    browser — so the customer reads a guess followed by an answer.
+
+    A prompt rule does not hold this at temperature 0, so the stream carries an
+    explicit retraction instead.
+    """
+    entered = await _enter(client, session_factory)
+    scripted(
+        [
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            says("One large latte, $5.20."),
+        ]
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "a large latte"}
+    )
+
+    kinds = [f["type"] for f in frames(response.text)]
+    assert "reset_reply" in kinds
+    # It has to arrive before the reply that replaces it.
+    assert kinds.index("reset_reply") < len(kinds) - kinds[::-1].index("token") - 1
+
+
+async def test_a_turn_with_no_tools_never_withdraws_anything(client, session_factory, scripted):
+    """Otherwise a plain answer would flicker for no reason."""
+    entered = await _enter(client, session_factory)
+    scripted([says("What can I get you?")])
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "hi"}
+    )
+
+    assert "reset_reply" not in [f["type"] for f in frames(response.text)]
+
+
+async def test_the_chat_log_only_ever_speaks_as_sam(client, session_factory, scripted):
+    """Three roles, one voice (spec §13.11).
+
+    Mo and Val show up in the decision panel and in Sam's own words; they never
+    become a second speaker in the conversation itself.
+    """
+    entered = await _enter(client, session_factory)
+    scripted(
+        [tool_call("ask_barista", request="a large latte with oat"), says("Mo's on it — $5.80.")],
+        barista=[
+            tool_call(
+                "add_to_cart", item_name="Latte", quantity=1, size="large", modifiers=["oat_milk"]
+            ),
+            says("Large oat latte in."),
+        ],
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "large oat latte"}
+    )
+
+    spoken = "".join(f["text"] for f in frames(response.text) if f["type"] == "token")
+    # Mo's own line reached the panel, not the conversation.
+    assert "Large oat latte in." not in spoken
+    results = [f for f in frames(response.text) if f["type"] == "tool_result"]
+    assert results[0]["agent"] == "barista"

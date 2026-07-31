@@ -50,3 +50,19 @@ SIZE_DELTAS: dict[str, int] = {
     "medium": 60,
     "large": 120,
 }
+
+# Flat across every drink for the same reason sizes are (spec §3.6). Applying a
+# modifier per item would need a 17x4 matrix, which then has to be rendered into
+# the prompt's menu block — the one thing §6.6 protects for compactness.
+#
+# whole_milk is the drink as listed: priced at zero and marked default, so it
+# canonicalizes out of the key and "a latte with regular milk" is the same cart
+# line as "a latte".
+#
+# code, delta_cents, exclusive_group, is_default
+MODIFIERS: list[tuple[str, int, str | None, bool]] = [
+    ("whole_milk", 0, "milk", True),
+    ("oat_milk", 60, "milk", False),
+    ("almond_milk", 60, "milk", False),
+    ("extra_shot", 100, None, False),
+]

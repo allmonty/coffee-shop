@@ -15,8 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import SessionLocal
-from shop.catalog_data import DRINKS, FOODS, SIZE_DELTAS
-from shop.models import DRINK, FOOD, MenuItem, SizeModifier
+from shop.catalog_data import DRINKS, FOODS, MODIFIERS, SIZE_DELTAS
+from shop.models import DRINK, FOOD, DrinkModifier, MenuItem, SizeModifier
 
 
 async def seed_catalog(session: AsyncSession) -> int:
@@ -37,6 +37,19 @@ async def seed_catalog(session: AsyncSession) -> int:
     for size, delta_cents in SIZE_DELTAS.items():
         if size not in existing_sizes:
             session.add(SizeModifier(size=size, delta_cents=delta_cents))
+            added += 1
+
+    existing_modifiers = set((await session.scalars(select(DrinkModifier.code))).all())
+    for code, delta_cents, exclusive_group, is_default in MODIFIERS:
+        if code not in existing_modifiers:
+            session.add(
+                DrinkModifier(
+                    code=code,
+                    delta_cents=delta_cents,
+                    exclusive_group=exclusive_group,
+                    is_default=is_default,
+                )
+            )
             added += 1
 
     await session.commit()

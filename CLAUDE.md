@@ -12,7 +12,7 @@ reasoning recorded inline. Read the relevant section before changing behaviour.
 ## Commands
 
 ```bash
-make test          # 176 tests, needs only Postgres — no Ollama
+make test          # 253 tests, needs only Postgres — no Ollama
 make lint          # ruff check + format --check
 make up            # full stack: app :3000, api :8000, Grafana :3001
 
@@ -77,13 +77,37 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
   price — the domain rejects a mismatch, so the model can only fail a charge, never lower one.
 - **Money-spending tools are gated in the domain, not the prompt.** `place_order` and `end_visit`
   require confirmation; a prompt instruction is the weakest available enforcement.
+- **Three roles, one voice.** Sam (waiter) fronts every conversation; Mo (barista) and Val (cashier)
+  are LLM sub-agents called as tools via `ask_barista` / `ring_up`. Sam has no money tools and no
+  `modifiers` argument — both gates are structural, because measurement showed prose gates do not
+  hold: given the argument, the real model never delegated once. A role owns a tool when its knowledge
+  fills the arguments, not when the tool sounds thematically like its job.
+- **Val decides *whether* to charge, never *what*.** `charge_the_customer` and `send_them_home` take no
+  arguments; the quoted total and "they said they're leaving" are injected through config. A second
+  model supplying `confirmed_total_cents` would read the cart, always match, and turn the project's
+  central guard into a rubber stamp. Val is also handed only the tools Sam authorised for that job.
+- **A delegation reports `charged` and `visit_ended` as facts.** One `ok` cannot carry the money path,
+  and Sam's "never say it is paid for" rule keys on `charged`, not on `ok`.
+- **A sub-agent's tool calls never enter the waiter's context.** They go to `delegation_steps` in graph
+  state, not into the envelope — the envelope becomes the ToolMessage content, which Sam re-reads every
+  later turn. The SSE layer joins them back for the UI.
 - **The menu lives in the context block; do not add a mandatory `get_menu` call per turn.** That was
   removed on purpose — it forced an extra `barista → tools → barista` lap, i.e. two local-model
   inferences instead of one, to re-read data that cannot change mid-visit.
 - **Today's menu ≠ the catalog.** Everything agent-facing is scoped through `visit_menu_items`.
   `unknown_item` and `not_available_today` are distinct errors because they are distinct truths.
-- **Sizes are drinks-only**, enforced by a check constraint. Never ask what size a cookie is.
-- **Money is integer cents everywhere.** `order_lines` snapshots unit price including size surcharge.
+- **Sizes and modifiers are drinks-only**, enforced by check constraints against the same `sized` flag.
+  Never ask what size a cookie is, or what milk it takes.
+- **Modifiers are optional; sizes are not.** There is deliberately no `modifier_required` — a drink with
+  no modifiers is a complete order. A modifier request can only be over-specified (`unknown_modifier`,
+  `modifier_conflict`), never under-specified. That asymmetry is why the two axes have different error
+  shapes even though they otherwise look alike.
+- **Line identity is `(item, size, modifier set)`**, held as a canonical sorted text key built *only* by
+  `shop/modifiers.py::canonical_key`. Never build that string anywhere else: it is what makes the same
+  drink ordered twice one line and two different drinks two lines. The barista never *offers* a
+  modifier — §3.5 and §4.5 already spend two upsell budgets.
+- **Money is integer cents everywhere.** `order_lines` snapshots unit price including size and modifier
+  surcharges.
 - **Only model-written `notes` are stored** in `customer_preferences`; `favorite_*`, `usual_order`,
   `visit_count`, `last_visit_day` are aggregated at read time. Never ask an LLM for a fact a `GROUP BY`
   can produce.
@@ -92,6 +116,13 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
 - **Every caller of the graph supplies the checkpointer.** `main.py`'s lifespan opens it and hands it
   to `routers/chat.py` via `set_checkpointer()`; the CLI opens its own. Compiling the graph without one
   does not fail — it silently makes the agent amnesiac, because each turn starts from empty state.
+- **Character names live in `agent/`, never in `shop/`.** Domain messages stay in the shop's own voice;
+  "Mo says" is applied by the agent layer to a sentence the domain wrote. `temperature=0` stays — do
+  not raise it to buy personality. Variety comes from varied inputs (visit milestones, weekday, cart),
+  never from model spontaneity.
+- **No concrete few-shot examples in a prompt.** A small model reads an example as content to reuse,
+  not as a shape to imitate: `qwen2.5:3b` copied a sample note verbatim and invented a mocha nobody
+  ordered. Examples use `<placeholder>` text.
 - **Telemetry is best-effort.** `api` must not `depends_on: otel`; a failed exporter must never fail a
   request. Metrics are for what only the runtime knows — order counts and revenue come from SQL, not
   from counters.

@@ -116,6 +116,9 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
 - **Every caller of the graph supplies the checkpointer.** `main.py`'s lifespan opens it and hands it
   to `routers/chat.py` via `set_checkpointer()`; the CLI opens its own. Compiling the graph without one
   does not fail — it silently makes the agent amnesiac, because each turn starts from empty state.
+- **The Go Home button must end the visit, whatever the model does.** It is a deterministic control,
+  not a sentence to interpret; `run_turn` closes the visit itself if the turn did not. Adding a
+  delegation in front of `end_visit` broke it once already.
 - **Character names live in `agent/`, never in `shop/`.** Domain messages stay in the shop's own voice;
   "Mo says" is applied by the agent layer to a sentence the domain wrote. `temperature=0` stays — do
   not raise it to buy personality. Variety comes from varied inputs (visit milestones, weekday, cart),

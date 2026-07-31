@@ -81,6 +81,9 @@ services:
       # provisioning directory looks right and loads nothing.
       - ./ops/grafana/provisioning/coffee-shop.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/coffee-shop.yaml:ro
       - ./ops/grafana/dashboards:/var/lib/grafana/dashboards/coffee-shop:ro
+      # Datasource provisioning is a separate directory from dashboard
+      # provisioning, and Grafana does not look for one in the other.
+      - ./ops/grafana/provisioning/datasources.yaml:/otel-lgtm/grafana/conf/provisioning/datasources/coffee-shop.yaml:ro
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin

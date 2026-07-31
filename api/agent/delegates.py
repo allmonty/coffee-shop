@@ -87,7 +87,7 @@ async def _run_subagent(
         for lap in range(1, MAX_LAPS + 1):
             started = time.monotonic()
             reply: AIMessage = await bound.ainvoke(messages, config)
-            record_llm_call(span, reply, (time.monotonic() - started) * 1000)
+            record_llm_call(span, reply, (time.monotonic() - started) * 1000, agent=role)
             messages.append(reply)
 
             if not reply.tool_calls:
@@ -102,7 +102,7 @@ async def _run_subagent(
             # (§13.7): one shared AsyncSession, and calls that are causally
             # ordered.
             for call in reply.tool_calls:
-                payload = await execute_tool_call(call, registry, config)
+                payload = await execute_tool_call(call, registry, config, agent=role)
                 steps.append(
                     {
                         "tool": call["name"],

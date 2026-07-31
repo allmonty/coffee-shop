@@ -13,6 +13,7 @@ and the cashier's tool list is not in the waiter's prompt at all.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from agent.instrumentation import (
@@ -27,11 +28,17 @@ async def execute_tool_call(
     call: dict[str, Any],
     registry: dict[str, Any],
     config: Any,
+    agent: str = "waiter",
 ) -> dict[str, Any]:
-    """The envelope for one tool call. Never raises."""
+    """The envelope for one tool call. Never raises.
+
+    `agent` is waiter|barista|cashier — a fixed set, never model-written, so it
+    is safe as a metric label and is what lets a dashboard ask what Mo costs as
+    against what Sam costs.
+    """
     tool = registry.get(call["name"])
     if tool is None:
-        return unknown_tool(call, registry)
+        return unknown_tool(call, registry, agent)
 
     extra = set(call.get("args") or {}) - set(tool.args)
     if extra:
@@ -46,13 +53,15 @@ async def execute_tool_call(
         # silently rather than sending the model to the right role.
         return _malformed(
             call,
+            agent,
             f"{call['name']} does not take {', '.join(sorted(extra))}. "
             f"It takes: {', '.join(sorted(tool.args)) or 'no arguments'}. "
             "Use the right tool for what you are trying to do.",
         )
 
-    with tool_span(call["name"]) as span:
-        record_tool_call(call["name"], call.get("args") or {})
+    started = time.monotonic()
+    with tool_span(call["name"], agent) as span:
+        record_tool_call(call["name"], call.get("args") or {}, agent)
         try:
             payload = await tool.ainvoke({**(call.get("args") or {})}, config)
         except Exception as error:
@@ -69,22 +78,24 @@ async def execute_tool_call(
                 ),
             }
             tool_malformed.add(1, {"reason": "invalid_arguments"})
-        record_tool_result(span, call["name"], payload)
+        record_tool_result(span, call["name"], payload, agent, (time.monotonic() - started) * 1000)
 
     return payload
 
 
-def _malformed(call: dict[str, Any], message: str) -> dict[str, Any]:
+def _malformed(call: dict[str, Any], agent: str, message: str) -> dict[str, Any]:
     """A bad call, reported the way every other tool failure is."""
     payload = {"ok": False, "error": "invalid_arguments", "message": message}
-    with tool_span(call["name"]) as span:
-        record_tool_call(call["name"], call.get("args") or {})
-        record_tool_result(span, call["name"], payload)
+    with tool_span(call["name"], agent) as span:
+        record_tool_call(call["name"], call.get("args") or {}, agent)
+        record_tool_result(span, call["name"], payload, agent)
         tool_malformed.add(1, {"reason": "invalid_arguments"})
     return payload
 
 
-def unknown_tool(call: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
+def unknown_tool(
+    call: dict[str, Any], registry: dict[str, Any], agent: str = "waiter"
+) -> dict[str, Any]:
     """An invented tool name is an ordinary tool failure, so treat it as one.
 
     Two things this must do that a bare `{ok, error}` did not:
@@ -111,10 +122,10 @@ def unknown_tool(call: dict[str, Any], registry: dict[str, Any]) -> dict[str, An
         ),
     }
 
-    with tool_span("unknown") as span:
+    with tool_span("unknown", agent) as span:
         span.set_attribute("tool.requested", call["name"])
-        record_tool_call(call["name"], call.get("args") or {})
-        record_tool_result(span, "unknown", payload)
+        record_tool_call(call["name"], call.get("args") or {}, agent)
+        record_tool_result(span, "unknown", payload, agent)
         tool_malformed.add(1, {"reason": "unknown_tool"})
 
     return payload

@@ -11,6 +11,7 @@ panel updates mid-sentence rather than after the barista stops talking.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -19,13 +20,24 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 
 from agent.instrumentation import turn_span
 from agent.summarize import summarize_visit
+from shop import service
+
+logger = logging.getLogger(__name__)
 
 GREETING_PROMPTS = {
     "on_enter": (
         "[The customer has just walked in. Greet them, ask what they'd like, "
         "and mention they can ask to hear the menu.]"
     ),
-    "go_home": "[The customer has pressed the Go Home button. They are leaving now.]",
+    # Spelled out because it has to happen, not because the model might like
+    # to: the waiter has no end_visit of its own any more, so leaving means one
+    # specific call. A backstop below closes the visit if it still does not.
+    "go_home": (
+        "[The customer has pressed the Go Home button. They are leaving NOW. "
+        "Call ring_up with going_home=true. If CURRENT ORDER still has anything "
+        "in it, pass its total as quoted_total_cents in the same call so they "
+        "pay on the way out. Then say goodbye.]"
+    ),
 }
 
 
@@ -107,6 +119,31 @@ async def run_turn(
                     yield frame
 
     ended = bool(final_state.get("visit_ended"))
+
+    if event == "go_home" and not ended:
+        # The button is not a sentence the model has to interpret — that is the
+        # whole reason it exists rather than us waiting for someone to type
+        # "bye" (§13.1). Leaving is still the customer's decision (§13.3); they
+        # have just made it, unambiguously, by pressing the thing labelled
+        # Go Home.
+        #
+        # Before the crew split the barista held `end_visit` and usually called
+        # it. Putting a delegation in the way was enough to break it: with an
+        # unpaid cart the model says goodbye, calls nothing, and the day never
+        # advances — the customer is stuck in the shop with no way out. An
+        # unpaid order is simply abandoned, which is what walking out means.
+        result = await service.end_visit(session, visit_id, confirmed=True)
+        if result.ok:
+            ended = True
+            logger.info("go_home.forced", extra={"visit_id": str(visit_id)})
+            async for frame in _domain_frames(
+                {
+                    "visit_ended": True,
+                    "day": result.data.get("day"),
+                    "wallet_cents": result.data.get("wallet_cents"),
+                }
+            ):
+                yield frame
     # How many model round-trips the turn actually cost. Invisible in the
     # conversation, and the only place a model going in circles shows up
     # outside Grafana.

@@ -986,8 +986,10 @@ Beyond the automatic HTTP/DB metrics, the agent-specific ones are where the insi
 | --- | --- | --- | --- |
 | `agent.turn.duration` | histogram | — | End-to-end latency the user actually feels. |
 | `agent.loop.iterations` | histogram | — | How many barista→tools laps per turn. A small model going in circles shows up here first, and nowhere else. |
-| `agent.tool.calls` | counter | `tool`, `ok` | Which tools the model actually reaches for, and how often they fail. |
-| `agent.tool.duration` | histogram | `tool` | — |
+| `agent.tool.calls` | counter | `tool`, `ok`, `agent` | Which tools the model actually reaches for, and how often they fail. |
+| `agent.tool.duration` | histogram | `tool`, `agent` | Domain time per tool. Declared in phase 3 and **never once recorded** until §13.11 — per-tool latency simply did not exist, so the slowest thing in a turn was invisible. |
+| `agent.delegations` | counter | `to` = `barista\|cashier` | How often Sam hands off (§13.11). A plain order should produce none; if "a large latte, please" delegates, the split is wrong. |
+| `agent.delegation.laps` | histogram | `to` | Tool laps inside one delegation, capped at 3. Makes a runaway sub-agent visible the way `loop.iterations` makes a runaway waiter visible. |
 | `agent.tool.malformed` | counter | `reason` | Model emitted an unparseable call or invented a tool. The headline quality metric for a 7B model. |
 | `agent.offmenu_request` | counter | `kind` | `unknown_item` (not in the catalog at all) vs `not_available_today` (real, just not drawn today, §3.3). The split tells you whether customers want things you don't sell, or things you sold out of. |
 | `agent.upsell.offers` | counter | `visit_had_prior_offer` | Prompt-rule compliance (§6.6). Any increment with `true` is a rule the model broke — the one honest way to know a soft constraint is holding. |
@@ -996,9 +998,18 @@ Beyond the automatic HTTP/DB metrics, the agent-specific ones are where the insi
 | `agent.guard.rejections` | counter | `guard` | The domain refusing a tool call the model should not have made: `total_mismatch` (charged without quoting the right total) or `unsolicited_end_visit` (§6.4). Should sit at zero; anything above zero is the model trying something the prompt forbade. |
 | `agent.summarize_visit.duration` | histogram | — | Background summarization pass (§6.5.1). |
 | `agent.notes.extracted` | counter | `count` | How many notes each visit yields. If this is never 0, the model is inventing facts. |
-| `llm.request.duration` | histogram | `model` | — |
-| `llm.tokens` | counter | `model`, `type=input\|output` | Context growth over a long conversation is very visible here. |
+| `llm.request.duration` | histogram | `agent` | — |
+| `llm.tokens` | counter | `type=input\|output`, `agent` | Context growth over a long conversation is very visible here — and the `agent` split is what shows a sub-agent's prompt is genuinely cheaper. Measured: ~28k input tokens for Sam against ~4k for Val over the same conversation. Note this recorded **nothing at all** until `stream_usage=True` was set on the client: the graph streams, and a streamed reply carries no usage metadata without it, so the token panel had always been empty. |
 | `orders.rejected` | counter | `reason` | `insufficient_funds`, `empty_cart`, `unknown_item`. A *runtime* signal — rejections leave no row behind, so nothing else records them. |
+
+**`agent`, not the agent's words.** Every per-role label is drawn from the fixed set
+`waiter|barista|cashier`. Same rule as the `tool.unknown` span name: model-written text in a metric
+label is unbounded cardinality (§9.3).
+
+Several metrics in this table have **never existed in code**: `agent.upsell.offers`,
+`agent.size_upsell.offers`, `agent.summarize_visit.duration`, `agent.notes.extracted` and
+`orders.rejected`. The first two are discussed in §13 under "Still open" — measuring them means
+classifying the model's prose. The rest are simply unbuilt.
 
 Deliberately **not** metrics: orders placed, revenue, items sold, visit counts. Postgres already stores
 every one of those exactly, in `orders`, `order_lines`, and `visits`. Re-counting them into Prometheus
@@ -1059,11 +1070,20 @@ works when its observability backend is healthy is worse than no observability.
 
 ### 9.7 Dashboards
 
-Provision one Grafana dashboard as JSON in `ops/grafana/dashboards/` so it survives a volume wipe and
-lives in git. Panels: turn latency p50/p95 · loop iterations histogram · tool call volume and failure
-rate by tool · tokens in/out per turn · malformed tool calls · guard rejections · a live error log
-stream. Add the Postgres datasource too, and drive the shop-business panels (orders, revenue, items
-sold by in-game day) from SQL against the real tables rather than from counters (§9.4).
+Dashboards are JSON in `ops/grafana/dashboards/`, so they survive a volume wipe and live in git.
+**Four**, once the counter was split into three roles (§13.11) — one board per agent plus an overview,
+because "how expensive is Mo" is not a question a single mixed board can answer:
+
+| Dashboard | For |
+| --- | --- |
+| **Sam — front of house** | Turn latency, laps per turn, delegations out, Sam's own tool calls, off-menu requests, size clarifications, guard rejections. |
+| **Mo — the machine** | Delegations in, laps inside one, tool calls and domain latency, model time and tokens, and a log panel of the clarifications Mo handed back. |
+| **Val — the till** | Charges taken and refused, guard rejections, visits closed, and every refusal with its reason. |
+| **The Shop** | Revenue, orders, customers and visits from **SQL**; what sells; extras uptake; sizes sold; then the cost of the whole design — model calls per turn and where the latency goes. |
+
+The business panels read Postgres directly, per §9.4: money is a fact the database already has, and a
+counter that shadows a `GROUP BY` is a second source of truth that drifts. The datasource is provisioned
+in `ops/grafana/provisioning/datasources.yaml`.
 
 Two provisioning details that fail *silently*, both of which cost an evening once:
 
@@ -1322,6 +1342,13 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
       turns the above into a plain espresso reported as a success — a silent wrong order, the worst of
       the three outcomes. `dispatch.execute_tool_call` now rejects unknown arguments as
       `invalid_arguments`, which is a general fix, not one for this case.
+    - *A deterministic control must not depend on the model.* The Go Home button exists precisely so
+      leaving is unambiguous rather than something the model has to read out of "bye" (decision 1).
+      Putting a delegation between Sam and `end_visit` was enough to break it: with an unpaid cart the
+      model says goodbye, calls nothing, and the day never advances — the customer is stuck in the shop
+      with no way out. `run_turn` now closes the visit itself when the `go_home` event did not, and the
+      event text names the exact call. Leaving is still the customer's decision (decision 3); they made
+      it by pressing the button. An unpaid order is abandoned, which is what walking out means.
     - *One `ok` cannot carry the money path.* "Any failed step fails the delegation" mislabels a
       successful charge; "any success succeeds it" would announce an order nobody paid for. `ring_up`
       reports `charged` and `visit_ended` as facts, and Sam's rule keys on `charged`.

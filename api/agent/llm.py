@@ -36,6 +36,11 @@ def build_llm(**overrides) -> ChatOpenAI:
         "api_key": "ollama",
         "temperature": 0,
         "timeout": 120,
+        # Without this a streamed reply carries no usage_metadata, so the
+        # llm.tokens counter recorded nothing and the dashboard's token panel
+        # was permanently empty. The graph streams, so every barista call was
+        # affected.
+        "stream_usage": True,
     }
     kwargs.update(overrides)
     return ChatOpenAI(**kwargs)

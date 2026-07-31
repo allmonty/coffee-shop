@@ -140,24 +140,34 @@ def node_span(name: str):
 
 
 @contextmanager
-def tool_span(name: str):
+def tool_span(name: str, agent: str = "waiter"):
     """A failed tool marks its own span, never the turn."""
     with tracer.start_as_current_span(f"tool.{name}") as span:
         span.set_attribute("tool.name", name)
+        span.set_attribute("agent.role", agent)
         yield span
 
 
-def record_tool_call(name: str, args: dict) -> None:
+def record_tool_call(name: str, args: dict, agent: str = "waiter") -> None:
     """Log the invocation before it runs, so a tool that hangs still leaves a trail.
 
     Note `tool_args`, not `args`: `extra` keys collide with the reserved
     attributes on `logging.LogRecord`, and `args` is one of them — logging
     raises rather than shadowing it.
     """
-    logger.info("tool.call", extra={"tool": name, "tool_args": _short(args)})
+    logger.info("tool.call", extra={"tool": name, "agent": agent, "tool_args": _short(args)})
 
 
-def record_tool_result(span, name: str, payload: dict) -> None:
+def record_tool_result(
+    span,
+    name: str,
+    payload: dict,
+    agent: str = "waiter",
+    duration_ms: float | None = None,
+) -> None:
+    """`agent` is one of waiter|barista|cashier — a fixed set, never a
+    model-written string, so it is safe as a metric label (§9.3). Without it
+    there is no way to ask what Mo costs as against what Sam costs."""
     ok = bool(payload.get("ok"))
     error = payload.get("error")
 
@@ -174,10 +184,20 @@ def record_tool_result(span, name: str, payload: dict) -> None:
     logger.log(
         logging.WARNING if error else logging.INFO,
         "tool.result",
-        extra={"tool": name, "ok": ok, "error": error or "", "envelope": _short(payload)},
+        extra={
+            "tool": name,
+            "agent": agent,
+            "ok": ok,
+            "error": error or "",
+            "envelope": _short(payload),
+        },
     )
 
-    tool_calls.add(1, {"tool": name, "ok": str(ok).lower()})
+    tool_calls.add(1, {"tool": name, "ok": str(ok).lower(), "agent": agent})
+    if duration_ms is not None:
+        # Declared since phase 3 and never once recorded, so per-tool latency
+        # did not exist anywhere — the slowest thing in a turn was invisible.
+        tool_duration.record(duration_ms, {"tool": name, "agent": agent})
 
     if error in {"unknown_item", "not_available_today"}:
         offmenu_requests.add(1, {"kind": error})
@@ -187,7 +207,9 @@ def record_tool_result(span, name: str, payload: dict) -> None:
         size_clarifications.add(1)
 
 
-def record_llm_call(span, response, duration_ms: float | None = None) -> None:
+def record_llm_call(
+    span, response, duration_ms: float | None = None, agent: str = "waiter"
+) -> None:
     """OTel GenAI semantic conventions (spec §9.3).
 
     Still marked experimental upstream and they do shift between releases; pin
@@ -196,17 +218,18 @@ def record_llm_call(span, response, duration_ms: float | None = None) -> None:
     """
     usage = getattr(response, "usage_metadata", None) or {}
     span.set_attribute("gen_ai.system", "ollama")
+    span.set_attribute("agent.role", agent)
     span.set_attribute("gen_ai.operation.name", "chat")
 
     if duration_ms is not None:
-        llm_duration.record(duration_ms)
+        llm_duration.record(duration_ms, {"agent": agent})
         span.set_attribute("gen_ai.request.duration_ms", round(duration_ms))
 
     if usage:
         span.set_attribute("gen_ai.usage.input_tokens", usage.get("input_tokens", 0))
         span.set_attribute("gen_ai.usage.output_tokens", usage.get("output_tokens", 0))
-        llm_tokens.add(usage.get("input_tokens", 0), {"type": "input"})
-        llm_tokens.add(usage.get("output_tokens", 0), {"type": "output"})
+        llm_tokens.add(usage.get("input_tokens", 0), {"type": "input", "agent": agent})
+        llm_tokens.add(usage.get("output_tokens", 0), {"type": "output", "agent": agent})
 
     calls = getattr(response, "tool_calls", None) or []
     span.set_attribute("gen_ai.response.tool_calls", len(calls))
@@ -223,6 +246,7 @@ def record_llm_call(span, response, duration_ms: float | None = None) -> None:
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
             "tool_calls": len(calls),
+            "agent": agent,
             "duration_ms": round(duration_ms) if duration_ms is not None else 0,
         },
     )

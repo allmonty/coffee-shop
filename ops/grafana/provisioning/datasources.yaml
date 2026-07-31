@@ -1,0 +1,26 @@
+# The application database as a Grafana datasource (spec §9.4).
+#
+# Prometheus holds what only the runtime knows — latency, laps, delegations,
+# malformed calls. It deliberately does NOT hold order counts or revenue: those
+# are facts the database already has, and a counter that shadows a SQL GROUP BY
+# is a second source of truth that drifts the first time a metric is dropped.
+#
+# So the Shop dashboard reads them from here instead. Read-only credentials
+# would be better; this is a local dev stack with a hardcoded password in
+# compose already, so it uses the same user.
+apiVersion: 1
+
+datasources:
+  - name: Coffee Shop DB
+    uid: coffee-shop-db
+    type: postgres
+    url: db:5432
+    user: coffee
+    isDefault: false
+    editable: false
+    jsonData:
+      database: coffee_shop
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: coffee

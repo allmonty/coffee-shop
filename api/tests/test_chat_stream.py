@@ -464,3 +464,69 @@ async def test_the_chat_log_only_ever_speaks_as_sam(client, session_factory, scr
     assert "Large oat latte in." not in spoken
     results = [f for f in frames(response.text) if f["type"] == "tool_result"]
     assert results[0]["agent"] == "barista"
+
+
+async def test_go_home_ends_the_visit_even_if_the_model_just_says_goodbye(
+    client, session_factory, scripted
+):
+    """The button must not depend on the model choosing a tool.
+
+    It exists precisely so leaving is unambiguous rather than something the
+    model has to read out of "bye" (§13.1). Putting a delegation between the
+    waiter and end_visit was enough to break it: with an unpaid cart the real
+    model says goodbye, calls nothing, and the customer is stuck in the shop
+    with the day never advancing.
+    """
+    entered = await _enter(client, session_factory)
+    scripted([says("Great visit! Have a nice day.")])
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "event": "go_home"}
+    )
+
+    events = frames(response.text)
+    assert any(f["type"] == "visit_ended" for f in events)
+    assert events[-1] == {"type": "done", "visit_ended": True}
+
+
+async def test_go_home_leaves_an_unpaid_order_behind(client, session_factory, scripted):
+    """Walking out without paying is a thing customers do. The wallet is not
+    charged and the day still advances."""
+    entered = await _enter(client, session_factory)
+    scripted([tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"), says("Sure.")])
+    await client.post("/api/chat", json={"visit_id": entered["visit_id"], "message": "a latte"})
+
+    scripted([says("See you tomorrow!")])
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "event": "go_home"}
+    )
+
+    ended = [f for f in frames(response.text) if f["type"] == "visit_ended"]
+    assert ended, "the visit must close even with an unpaid cart"
+    assert ended[0]["wallet_cents"] == 2000
+
+
+async def test_go_home_does_not_double_end_when_the_cashier_already_did(
+    client, session_factory, scripted
+):
+    """The backstop is a backstop, not a second close-out.
+
+    `visit_ended` frames are emitted per state snapshot and so can repeat — that
+    predates this and the UI is idempotent about it. What must not happen is the
+    day advancing twice.
+    """
+    entered = await _enter(client, session_factory)
+    scripted(
+        [tool_call("ring_up", request="they are off", going_home=True), says("Night!")],
+        cashier=[tool_call("send_them_home"), says("Closed out.")],
+    )
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "event": "go_home"}
+    )
+
+    assert any(f["type"] == "visit_ended" for f in frames(response.text))
+
+    # One press, one day. Two close-outs would land them on day 3.
+    again = (await client.post("/api/enter", json={"name": "Allan"})).json()
+    assert again["day"] == 2

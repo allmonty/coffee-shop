@@ -1,0 +1,411 @@
+{
+  "uid": "coffee-shop",
+  "title": "The Shop \u2014 visits, money and the whole loop",
+  "tags": [
+    "coffee-shop",
+    "overview"
+  ],
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "visit",
+        "label": "Visit (one in-game day)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Revenue, all time",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(SUM(total_cents), 0) / 100.0 AS revenue FROM orders",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ],
+      "description": "From the orders table, not from a counter. Money is a fact the database already has; a metric that shadows it is a second source of truth that drifts (\u00a79.4).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Orders placed",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS orders FROM orders",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Customers",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS customers FROM users",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Visits (open + closed)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) FILTER (WHERE ended_at IS NULL) AS open, COUNT(*) FILTER (WHERE ended_at IS NOT NULL) AS closed FROM visits",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "type": "barchart",
+      "title": "Revenue by in-game day",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT day, SUM(total_cents) / 100.0 AS revenue FROM orders GROUP BY day ORDER BY day",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ],
+      "description": "$20 per customer per day is the ceiling, so this scales with how many people came in.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "What sells",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT mi.name AS item, SUM(ol.quantity) AS sold FROM order_lines ol JOIN menu_items mi ON mi.id = ol.menu_item_id GROUP BY mi.name ORDER BY sold DESC LIMIT 12",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ],
+      "description": "Only ever what was actually charged \u2014 order_lines snapshots the price and the extras at the moment of sale."
+    },
+    {
+      "type": "table",
+      "title": "Extras uptake \u2014 did modifiers earn their keep?",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN ol.modifiers = '' THEN '(plain)' ELSE ol.modifiers END AS extras, SUM(ol.quantity) AS sold, SUM(ol.quantity * ol.unit_price_cents) / 100.0 AS revenue FROM order_lines ol GROUP BY 1 ORDER BY sold DESC",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ],
+      "description": "The whole point of \u00a713.8. If (plain) is everything, either nobody wants extras or Sam is not routing them to Mo."
+    },
+    {
+      "type": "table",
+      "title": "Sizes sold",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "coffee-shop-db"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(ol.size, '(no size)') AS size, SUM(ol.quantity) AS sold FROM order_lines ol GROUP BY 1 ORDER BY sold DESC",
+          "format": "table",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "coffee-shop-db"
+          },
+          "rawQuery": true
+        }
+      ],
+      "description": "Food has no size, by construction \u2014 a sized food line cannot be stored."
+    },
+    {
+      "type": "timeseries",
+      "title": "Model calls per turn, and delegations",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_loop_iterations_bucket[5m])) by (le))",
+          "legendFormat": "Sam's laps p95",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum by (to) (rate(agent_delegations_total[5m]))",
+          "legendFormat": "delegated to {{to}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "The cost of the whole design in one panel. Every lap and every delegation is a local-model inference."
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn latency (p95) and where it goes",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_turn_duration_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "whole turn",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, agent) (rate(llm_request_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "model: {{agent}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_tool_duration_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "tools (domain)",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "If the turn line sits far above the model lines, the time is not in the model \u2014 check the database.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Everything, one visit at a time",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"coffee-shop-api\"} | scope_name = \"coffee_shop.agent\" | visit_id=~\"$visit\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "queryType": "range"
+        }
+      ],
+      "description": "Set the Visit variable above to a visit_id to read a single in-game day end to end. Click a trace_id to jump to the turn.",
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Warnings and errors only \u2014 should stay empty",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"coffee-shop-api\"} | visit_id=~\"$visit\" | severity_text =~ \"WARN.*|ERROR\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "queryType": "range"
+        }
+      ],
+      "description": "A refused charge logs at WARNING on purpose \u2014 it is a normal outcome. ERROR here means something actually broke.",
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

@@ -1,0 +1,262 @@
+{
+  "uid": "val-cashier",
+  "title": "Val \u2014 the till",
+  "tags": [
+    "coffee-shop",
+    "agent"
+  ],
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "visit",
+        "label": "Visit (one in-game day)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Charges taken (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(agent_tool_calls_total{agent=\"cashier\",tool=\"charge_the_customer\",ok=\"true\"}[1h]))",
+          "legendFormat": "charged",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Successful place_order calls, made by Val and nobody else \u2014 Sam has no money tool at all (\u00a713.11)."
+    },
+    {
+      "type": "stat",
+      "title": "Charges refused (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(agent_tool_calls_total{agent=\"cashier\",tool=\"charge_the_customer\",ok=\"false\"}[1h]))",
+          "legendFormat": "refused",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "insufficient_funds, total_mismatch or empty_cart. A refusal is a normal outcome, not a fault."
+    },
+    {
+      "type": "stat",
+      "title": "Guard rejections (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (guard) (increase(agent_guard_rejections_total[1h]))",
+          "legendFormat": "{{guard}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "total_mismatch is the central guard: Val charges the figure Sam quoted out loud, and the domain refuses it if the cart disagrees."
+    },
+    {
+      "type": "stat",
+      "title": "Visits closed (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(agent_tool_calls_total{agent=\"cashier\",tool=\"send_them_home\",ok=\"true\"}[1h]))",
+          "legendFormat": "closed",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Only counts closures Val performed. The Go Home button has a deterministic backstop that does not go through Val."
+    },
+    {
+      "type": "timeseries",
+      "title": "Val's tool calls, by outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool, ok) (rate(agent_tool_calls_total{agent=\"cashier\"}[5m]))",
+          "legendFormat": "{{tool}} ok={{ok}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Val is handed only the tools Sam authorised for that job \u2014 no quoted total means no charge_the_customer at all."
+    },
+    {
+      "type": "timeseries",
+      "title": "Delegations to Val, and laps inside them",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_delegations_total{to=\"cashier\"}[5m]))",
+          "legendFormat": "ring_up",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_delegation_laps_bucket{to=\"cashier\"}[5m])) by (le))",
+          "legendFormat": "laps p95",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Model time and tokens",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(llm_request_duration_milliseconds_bucket{agent=\"cashier\"}[5m])) by (le))",
+          "legendFormat": "latency p95 (ms)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(llm_tokens_total{agent=\"cashier\"}[5m]))",
+          "legendFormat": "tokens/s",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "Every refusal Val gave, and the reason",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"coffee-shop-api\"} | scope_name = \"coffee_shop.agent\" | visit_id=~\"$visit\" | agent = \"cashier\" | error != \"\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

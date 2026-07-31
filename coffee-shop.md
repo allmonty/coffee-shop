@@ -157,8 +157,9 @@ the actual enforcement of the user-facing rule "there must always be options und
 
 This is where the daily menu earns its place — three new situations the barista has to handle:
 
-- The customer's **usual is not available today**. `get_usual_order` flags which items are missing, and
-  the barista must say so and offer the nearest thing on today's menu rather than silently substituting.
+- The customer's **usual is not available today**. THEIR USUAL in the context block flags each line
+  `available_today`, and the barista must say so and offer the nearest thing on today's menu rather than
+  silently substituting.
 - A customer asks for a **real item that isn't on today's menu**. Different from an invented item: "we're
   not doing mochas today" is a truthful answer, "we don't sell mochas" is not.
 - `add_to_cart` rejects an item that exists in the catalog but is not on today's menu, with a distinct
@@ -215,11 +216,40 @@ measured by `agent.size_upsell.*` (§9.4). Like the item upsell, this is a promp
 backstop rather than a hard invariant — nothing here spends money without the customer agreeing, so it
 does not need domain enforcement, only honest measurement.
 
-### 3.6 Further modifiers (v2, optional)
+### 3.6 Further modifiers
 
-Milk type (whole/oat/almond, oat and almond +$0.60) and extra shots (+$1.00). Deliberately left out: size
-alone already teaches the partial-specification lesson, and each additional modifier multiplies the
-clarifying questions the barista has to juggle before it can complete a single order.
+**Shipped.** Milk type (whole/oat/almond, oat and almond +$0.60) and extra shots (+$1.00). Originally
+deferred as an optional v2 on the grounds that size alone already teaches the partial-specification
+lesson; the reason for adding them anyway is recorded in §13.8, along with the storage decision.
+
+| Code | Price | Notes |
+| --- | --- | --- |
+| `whole_milk` | +$0.00 | The drink as listed. Canonicalizes *out* of the key, so "a latte" and "a latte with regular milk" are the same cart line. |
+| `oat_milk` | +$0.60 | Exclusive group `milk` |
+| `almond_milk` | +$0.60 | Exclusive group `milk` |
+| `extra_shot` | +$1.00 | No group; stacks with any milk |
+
+Flat across every drink, for the same reason size deltas are (§3.4): a per-item applicability matrix
+would be 17×4 rows that must then be rendered into the prompt's menu block, which §6.6 protects for
+compactness. The menu block gains exactly **one** line for the whole feature.
+
+**Rules**
+
+1. Modifiers are drinks-only, enforced by the same `sized` flag and composite FK that make a large
+   cookie unrepresentable (§8). An oat milk cookie is rejected by the database, not by a service check.
+2. Modifiers are **optional**, and this is the interesting asymmetry with sizes. There is no
+   `modifier_required`, because a drink with no modifiers is a complete order rather than an incomplete
+   one. A modifier request can only ever be *over*-specified — `unknown_modifier`, `modifier_conflict` —
+   never under-specified. Sizes taught "notice what is missing and ask"; modifiers teach "notice what
+   cannot be honoured and offer the alternatives".
+3. Two codes in one exclusive group cannot share a cup. `modifier_conflict`'s message is a question.
+4. The barista never *offers* a modifier. §3.5 and §4.5 already spend two upsell budgets; a third is
+   exactly the "multiplies the clarifying questions" failure this section originally warned about.
+5. `"a latte with milk"` needs no clarifying question — whole milk is the drink as listed, so the order
+   proceeds. Asking "which milk?" there is the interrogation §3.4 warns against. The domain never sees
+   the word "milk": the tool takes codes, and mapping language to codes is the agent's job.
+6. Affordability guarantees (§3.2) are unchanged: they are computed on **small, unmodified** prices,
+   which is still the cheapest a customer can ever pay.
 
 ---
 
@@ -284,8 +314,8 @@ Since there are no chips, **this greeting is the entire onboarding surface**. Bo
 question and must mention that the menu is available on request. Get this line right before tuning
 anything else; a customer who doesn't know they can ask for the menu is stuck in front of a text box.
 
-If the user says "yes" / "the usual", the agent calls `get_usual_order`, fills the cart, and asks to
-confirm payment.
+If the user says "yes" / "the usual", the agent reads THEIR USUAL from its context block, calls
+`add_to_cart` for each line, and asks to confirm payment.
 
 ### 4.4 Going home
 
@@ -552,7 +582,7 @@ flowchart TD
 
     subgraph TOOLS["what the tools node can call"]
         direction LR
-        RO["read-only<br/>get_wallet_balance<br/>get_usual_order<br/>get_cart<br/>get_menu — rarely, menu is in context"]
+        RO["read-only<br/>get_wallet_balance<br/>get_cart<br/>get_menu — rarely, menu is in context"]
         MU["mutating<br/>add_to_cart<br/>remove_from_cart"]
         GA["confirmation-gated §6.4<br/>place_order · confirmed_total_cents<br/>end_visit · confirmed"]
     end
@@ -565,7 +595,7 @@ flowchart TD
     GA -- "domain re-checks the quoted total<br/>and rejects unsolicited exits" --> SVC
     SVC["shop.service<br/>validates · owns the money · returns ok / error envelope"]
 
-    EC -. "background task, after the SSE stream closes<br/>own root span, never blocks the customer" .-> SUM["agent.summarize_visit §6.5.1<br/>transcript → at most 2 durable notes<br/>written via shop.service.append_customer_note"]
+    EC -. "background task, after the SSE stream closes<br/>own root span, never blocks the customer" .-> SUM["agent.summarize_visit §6.5.1<br/>transcript → at most 2 durable notes<br/>written via shop.service.append_customer_notes"]
 
     classDef gated fill:#fce8e6,stroke:#ea4335,color:#000
     classDef domain fill:#e8f0fe,stroke:#4285f4,color:#000
@@ -597,7 +627,6 @@ flowchart TD
 | --- | --- | --- |
 | `get_menu` | `category?` | **Today's** menu with prices (§3.2). Rarely needed — it is already in the context block (§6.6). |
 | `get_wallet_balance` | — | Remaining money for today. |
-| `get_usual_order` | — | Most frequent item combination, or `null` for a new customer. Each line is flagged `available_today: true/false`. |
 | `add_to_cart` | `item_name`, `quantity`, `size?` | Adds a line. Errors `unknown_item` if it is not in the catalog at all, `not_available_today` if it exists but wasn't drawn today (§3.3) — two different errors so the barista can tell the customer the truth. Also `size_required` for a drink with no size, and `size_not_applicable` for a size on food (§3.4). |
 | `remove_from_cart` | `item_name`, `size?`, `quantity?` | Removes a line. `size` disambiguates when the cart holds the same drink in two sizes. |
 | `change_size` | `item_name`, `from_size`, `to_size` | Resizes an existing cart line and reprices it. The size-upsell path (§3.5) in one call, so it reads as one step in the trace instead of a remove-then-re-add. |
@@ -643,8 +672,8 @@ Three distinct layers, kept separate on purpose — telling them apart is a larg
 | Customer profile | All visits | Structured fields aggregated from `orders` at read time; model-written `notes` stored in `customer_preferences`. |
 | Domain state | Permanent | `orders`, `wallet`, `visits` in `shop/`, read via tools. |
 
-Raw transcripts are kept forever in `messages` for display and history, but are **never re-injected into
-a prompt**. Everything the barista "remembers" across visits arrives through the profile below.
+The `messages` table exists for display and history, but **nothing writes to it today** — the only
+surviving transcript is the checkpointer's, and it is **never re-injected into a prompt**. Everything the barista "remembers" across visits arrives through the profile below.
 
 The customer profile is a small computed record, not a vector store — order history is short and
 structured, so semantic search would be over-engineering:
@@ -684,7 +713,7 @@ if nothing stands out.* The results append to `notes`.
 
 - Runs **after** the SSE response is closed. The customer is already walking out; they must never wait on
   it, and a failure here must never fail the visit.
-- Writes through `shop.service.append_customer_note(...)`, never directly to the table. This is the one
+- Writes through `shop.service.append_customer_notes(...)`, never directly to the table. This is the one
   place where model-generated content lands in a domain table, so it is the easiest place to breach the
   §5.1 boundary by accident — the write belongs to `shop/`, the summarizing belongs to `agent/`.
 - `notes` is capped at ~10 entries, oldest dropped first. Without a cap it grows until it crowds the
@@ -1185,6 +1214,10 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
 6. **Sizes ship in v1, other modifiers do not** (§3.4, §3.6). Size alone already teaches the
    partial-specification lesson — "a latte" is a reasonable sentence the agent cannot act on — and every
    further modifier multiplies the clarifying questions needed before a single order can complete.
+   **Superseded in part by decision 8**: milk type and extra shots shipped later. The reasoning above is
+   why they were not in v1 and it still holds — but on re-reading, it is an argument about *offering*
+   modifiers, not about supporting them. A barista forbidden to volunteer an extra asks no additional
+   questions, so the cost the objection priced never arrives.
 7. **Tool calls run sequentially, in our own `run_tools` rather than LangGraph's `ToolNode`** (§6.3).
    The prebuilt node runs a turn's calls concurrently, which is wrong here twice over: they share one
    `AsyncSession`, which is not safe for concurrent use, and they are causally ordered — a model
@@ -1195,14 +1228,140 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
    execution is also what makes the trace readable in the order the customer's sentence implied.
    Found by talking to the real model, not by a test (`69ac67f`); no scripted test emitted two calls in
    one message, so the suite was green throughout.
+8. **Modifiers are a canonical text key on the line, not a child table** (§3.6). Adding milk and shots
+   makes cart-line identity `(item, size, modifier set)`, which the old
+   `UNIQUE (cart_id, menu_item_id, size)` cannot express. `cart_lines.modifiers` holds sorted,
+   deduped, comma-joined codes (`''`, `'extra_shot,oat_milk'`) and the constraint becomes a unique index
+   over it. The rejected alternative was a normalized `cart_line_modifiers` child table: a unique
+   constraint cannot aggregate over a child table, so it *still* needs a denormalized key column, and
+   Postgres generated columns cannot be maintained across tables — leaving a trigger or application
+   trust, both of which `CartLine`'s docstring exists to refuse. It also adds a join to `cart_payload`,
+   which runs on every turn. JSONB was rejected too: `["oat","shot"]` and `["shot","oat"]` are different
+   jsonb values, so canonicalization is mandatory regardless and JSONB buys nothing on the actual
+   problem. The trade accepted: no FK from line to `drink_modifiers`, so an unknown code is a domain
+   error rather than an IntegrityError — contained by a single canonicalization chokepoint
+   (`shop/modifiers.py`, its own test file) and by `unit_price_cents` **raising** on an unpriced code
+   rather than silently charging $0.
+   Two things this change also fixed, both silent rather than loud: `change_size`'s merge-target lookup
+   ignored modifiers, which would have merged an oat latte into a plain one at the plain price; and its
+   source lookup used `session.scalar()`, which returns the first row without complaining about the
+   rest, so it would have resized an arbitrary variant. Neither would have failed a pre-existing test.
+   The new unique index keys on `coalesce(size, '')`, which closes a hole that predates modifiers
+   entirely: NULLs are distinct in a UNIQUE constraint, so the old one never bound food lines at all.
+
+9. **`notes` are shown to the user, and so is the tool record** (§7.2). Resolves the open question below
+   about whether showing notes breaks the illusion — it does not, because the framing carries it: a
+   "What Sam remembers" panel reads as character rather than as a debug dump, and the memory layer is
+   the most interesting thing in the project to make visible. Note the backend had *already* made this
+   choice by serving `notes` on `/api/users/{id}/profile`; only the UI was abstaining.
+   Alongside it, a "What Sam did" panel fed by two new frames: `tool_result` (one per call, paired with
+   its envelope) and `turn_stats` (`loop_count`). Deliberately the **tool record, not a model-authored
+   rationale** — `qwen2.5` is not a reasoning model, so asking it to explain itself produces a
+   post-hoc invention that can contradict the calls listed beside it, which is the same failure the
+   mandatory-`message` rule exists to prevent (§6.4).
+   The frames are derived by walking `messages` and pairing each `AIMessage.tool_calls` entry with its
+   `ToolMessage` by `tool_call_id`, rather than by adding state. One trap, found by driving the running
+   stack rather than by a test: `messages` is the whole **checkpointed thread**, not the current turn's
+   slice, so a per-turn "already reported" set that starts empty replays every earlier turn's calls
+   under the current turn. It is seeded from the first snapshot instead, which is emitted after
+   `load_context` and therefore before any tool in this turn can have run.
+
+10. **Summarization takes its own model, opt-in via `OLLAMA_SUMMARY_MODEL`** (§6.5.1). Resolves the open
+    question below. Summarizing is a different job from conversation — no tools, no rules to follow, one
+    short structured answer — so it does not need the model that has to tool-call correctly. Unset falls
+    back to `OLLAMA_MODEL`, which is what shipped before; it is deliberately **not** defaulted to a small
+    model, because `summarize_visit` never raises, so pointing it at something un-pulled would make notes
+    silently stop being written. Measured on a real transcript: `qwen2.5:3b` runs the pass in 0.3–2.5s
+    against 1.1–10.2s for `14b-instruct`.
+    Also added the `agent.summarize_visit` root span this section had specified since the beginning and
+    never had, with the model name as an attribute — without it, "did the small model actually run" is
+    unanswerable.
+    **What the small model taught us, which is the more useful half.** The prompt used to illustrate its
+    output with real-looking notes (`["found the mocha too sweet", "always comes in early"]`). `3b`
+    copied them straight into its answer, inventing a mocha that appeared nowhere in the transcript —
+    precisely the compounding-false-memory failure rule 1 exists to prevent, and `14b` had been hiding it.
+    Replacing every example with a `<note>` placeholder fixed it on both models. Generalised: **a small
+    model reads a few-shot example as content to reuse, not as a shape to imitate.** Since a bigger model
+    masks the fault, the cheap way to find it is to run the prompt on a smaller one on purpose.
+
+11. **Three roles, one voice: the waiter fronts, the barista and cashier are sub-agents called as tools.**
+    Sam works the counter, Mo works the machine, Val works the till. Mo and Val are reached through
+    `ask_barista` and `ring_up`, each with its own prompt and its own tool list.
+    *Rejected: three peers with model-driven handoff.* It costs 3–5 local inferences per turn against
+    today's 1–2 — a direct reversal of the §6.6 decision that deleted a *single* extra inference. It also
+    forces per-agent message channels into the checkpointed state (or lets each agent read the others'
+    tool calls, which reliably confuses a 14b model), and it gives one customer three voices. If that
+    trade is ever worth making, change this decision rather than drifting into it.
+    **The tool-ownership rule this produced:** a role owns a tool when the role's knowledge is needed to
+    fill in its arguments — not when the tool sounds thematically like theirs. That is why `change_size`
+    stayed with Sam: its arguments are already canonical, and §3.5 makes it the size-upsell path, which
+    is a conversational move. Routing "yes, make it large" through Mo would add an inference to one of
+    the most common turns in the app and buy nothing.
+    **Every gate is structural, because measurement showed prose gates do not hold.** Three of them:
+    - Sam has no `place_order` and no `end_visit`, so it cannot spend money without Val.
+    - `charge_the_customer` and `send_them_home` take **no arguments at all**. `confirmed_total_cents`
+      only proves anything because it is the figure the model that *spoke to the customer* said out
+      loud; letting Val supply it would mean Val reads the cart, always quotes a matching total, and
+      `place_order` starts rubber-stamping. Val decides *whether*, never *what* — the figure and
+      "they said they're leaving" are injected through config, the same path `session` and `visit_id`
+      already travel.
+    - Val is handed only the tools Sam authorised for that one job. Asked merely to take payment, Val
+      also called `send_them_home`; the domain refused it, but the delegation then reported failure for
+      a charge that *had* gone through, and Sam told the customer their payment had not worked.
+    **What the split actually buys**, beyond the roles: a sub-agent's schemas never enter Sam's prompt,
+    which is what makes `change_modifiers` affordable — it would not earn its schema tokens on every
+    inference, but costs nothing in Mo's toolbox. Steps are kept in graph state rather than in the
+    envelope for the same reason: the envelope becomes the ToolMessage's content, so carrying them
+    would push every sub-agent's calls into Sam's context on every later turn.
+    **Three things only the real model revealed**, none of which a scripted test would have:
+    - *Prose gates do not hold.* Left with a `modifiers` argument of its own, Sam handled "a large
+      espresso with oat milk" alone and Mo never ran once — a role nothing can reach is decoration. The
+      waiter's `add_to_cart` now has no such argument. The two shapes share a name and a service
+      function; only the schema differs.
+    - *LangChain silently drops an argument a tool does not declare*, and runs the call without it. That
+      turns the above into a plain espresso reported as a success — a silent wrong order, the worst of
+      the three outcomes. `dispatch.execute_tool_call` now rejects unknown arguments as
+      `invalid_arguments`, which is a general fix, not one for this case.
+    - *One `ok` cannot carry the money path.* "Any failed step fails the delegation" mislabels a
+      successful charge; "any success succeeds it" would announce an order nobody paid for. `ring_up`
+      reports `charged` and `visit_ended` as facts, and Sam's rule keys on `charged`.
+
+12. **The crew have personalities, and they cost no inference.** Sam is warm and wry, Mo is fast and
+    literal, Val is dry — Val is the one who says no, so dryness is the role rather than a costume.
+    All of it is prompt text and UI: `agent.loop.iterations` and `agent.delegations` are unchanged by
+    it, which is the check that it stayed free. Anything that moved either number would mean character
+    had leaked into the loop and belonged in the UI instead.
+    **Attribution lives in `agent/`, never in `shop/`.** Domain messages stay in the shop's own voice —
+    *"We don't do bubble tea, I'm afraid."* — because `shop/` must not know an LLM exists, let alone
+    that there are three of them. "Mo says" is applied by the agent layer to a sentence the domain
+    wrote. Breaking this would put a character name in a function the REST API also calls, where there
+    is no Mo.
+    **Variety has to come from inputs, not from the model.** `temperature=0` is correct for
+    rule-following and tool-calling, and it is not negotiable — but it means the same situation
+    produces the same line every time, and a character who says the identical thing on your fourth oat
+    latte reads worse than no character at all. So every hook is driven by something that actually
+    varies: `visit_count` milestones at 5, 10 and 25 (free — the number is already aggregated and
+    already in the context block), the weekday (§13.4, previously flavour with nowhere to land), what
+    is on today's menu, what is in the cart. **Do not raise the temperature to buy personality**; it
+    would cost tool-calling accuracy, which is the one thing this project cannot trade.
+    **Error paths are where character does real work**, and this is mostly free too: every envelope
+    already carries a sentence written to be read aloud (§6.4). A sub-agent that hits its lap cap says
+    *"Mo's in the weeds"* rather than returning a bare code, and Val's refusals name a specific way out.
 
 ### Still open
 
-- **What model does the summarization pass use?** The same local model is the obvious answer, but
-  summarization is a different job from conversation and could take a smaller, faster one.
-- **Should `notes` ever be shown to the user?** A "what Sam remembers about you" panel would make the
-  memory layer visible and is a good debugging surface — but seeing the notes may break the illusion.
 - **Does the menu in every prompt crowd the context window?** Today's menu is 8–12 short lines — not the
   30-item catalog — and it replaced a mandatory `get_menu` round-trip that cost an entire extra model
   inference per turn (§6.6), so the trade is clearly worth it. The daily subset helps here as a side
-  effect: the prompt never carries the whole catalog. Revisit only if further modifiers (§3.6) enlarge each line.
+  effect: the prompt never carries the whole catalog. The revisit condition was "if further modifiers
+  enlarge each line"; decision 8 shipped them without doing so — surcharges are one line for the whole
+  block, exactly as size deltas are — so this stays open on the same terms.
+- **The upsell backstops are declared but never written.** `upsell_used`, `size_offers` and
+  `size_declines` exist in `BaristaState`, are carried forward by `load_context` and are rendered into
+  the context block — but no node or tool ever sets them, so the "NOTE:" branch in the prompt is
+  unreachable and decisions 2 and 2b are enforced by prompt alone. The metrics those decisions cite as
+  verification (`agent.upsell.offers`, `agent.size_upsell.*`, §9.4) were never implemented either.
+  This is honest drift rather than an oversight to patch quickly: deciding whether the model *made* an
+  upsell means classifying its prose, which is precisely the kind of judgement the rest of the project
+  refuses to ask an LLM for. Either accept the rules are prompt-only and delete the state, or find a
+  measurement that is not a classifier.

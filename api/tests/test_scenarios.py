@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from agent.graph import build_graph
 from agent.runner import run_turn
-from shop.models import MenuItem, User, VisitMenuItem
+from shop.models import MenuItem, Order, User, VisitMenuItem
 from shop.seed import seed_catalog
 from shop.service import enter, get_cart
 
@@ -185,7 +185,7 @@ async def test_a_drink_only_ever_goes_in_once(shop):
     assert sum(line["quantity"] for line in cart["lines"]) == 1
 
 
-async def test_paying_debits_once_and_leaves_the_cart_empty(shop):
+async def test_paying_debits_exactly_once(shop):
     """Val charged twice in one delegation, the second failing with empty_cart —
     and then narrated that, telling the customer their order was empty right
     after they paid for it."""
@@ -196,12 +196,26 @@ async def test_paying_debits_once_and_leaves_the_cart_empty(shop):
     await say("yes please, go ahead")
 
     user = await session.get(User, user_id)
-    cart = (await get_cart(session, visit_id)).data
-    # Either it charged (wallet down by exactly the cart total) or it did not
-    # (wallet untouched). What must never happen is a partial or double debit.
-    assert user.wallet_cents in (2000, 1420), user.wallet_cents
-    if user.wallet_cents == 1420:
-        assert cart["lines"] == []
+    orders = (
+        (
+            await session.execute(
+                select(Order.total_cents)
+                .where(Order.visit_id == visit_id)
+                .order_by(Order.placed_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Asserted on `orders`, not on the cart. "yes please, go ahead" is ambiguous
+    # enough that the model sometimes reads it as a fresh order and adds a drink
+    # after paying — annoying, but not wrong, and not what this test is about.
+    # What must never happen is a partial or a double debit.
+    assert user.wallet_cents == 2000 - sum(orders), (user.wallet_cents, orders)
+    assert len(orders) <= 1, f"charged more than once: {orders}"
+    if orders:
+        assert orders[0] == 580, orders
 
 
 async def test_the_waiter_never_spends_money_itself(shop):

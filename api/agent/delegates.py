@@ -44,15 +44,16 @@ from agent.tools import BARISTA_TOOLS, WAITER_CART_TOOLS, _context, cashier_tool
 # customer than the sub-agent is to keep guessing.
 MAX_LAPS = 3
 
-# Injected by the graph so tests can script the sub-agents. Set together with the
-# waiter's model in `build_graph`; a delegation with no model configured returns
-# an envelope rather than raising, like every other tool failure.
-_MODELS: dict[str, Any] = {"barista": None, "cashier": None}
 
+def _model(config: RunnableConfig, role: str):
+    """The sub-agent's model, injected per-graph by `run_tools`.
 
-def set_models(*, barista=None, cashier=None) -> None:
-    _MODELS["barista"] = barista
-    _MODELS["cashier"] = cashier
+    Not a module global: that is shared by every graph in the process, so the
+    CLI running beside the web app — or one test after another — would silently
+    rebind the other's sub-agents. Same reasoning as session and visit_id in
+    agent/tools.py.
+    """
+    return (((config or {}).get("configurable") or {}).get("models") or {}).get(role)
 
 
 async def _run_subagent(
@@ -69,7 +70,7 @@ async def _run_subagent(
     Never raises, for the same reason `run_tools` never raises — the caller is a
     language model and the turn has to survive whatever it does.
     """
-    model = _MODELS.get(role)
+    model = _model(config, role)
     if model is None:
         return _envelope(
             role,
@@ -251,6 +252,29 @@ async def ring_up(
     quoted and what was said.
     """
     session, visit_id = _context(config)
+
+    if quoted_total_cents is None and not going_home:
+        # Val is only given the tools the waiter authorised, so a ring_up with
+        # neither a quoted total nor going_home hands over no authority at all:
+        # Val can read the cart and say something, and nothing can happen. Seen
+        # against the real model — the delegation came back with zero steps, the
+        # customer neither charged nor sent home, and Sam with nothing to act on.
+        #
+        # Refused here rather than spending an inference discovering it, and the
+        # message says which of the two is missing.
+        return _envelope(
+            "cashier",
+            ok=False,
+            error="nothing_to_do",
+            message=(
+                "Val needs to know what is happening. Pass quoted_total_cents "
+                "with the total you said out loud if they are paying, or "
+                "going_home=true if they are leaving, or both."
+            ),
+            charged=False,
+            visit_ended=False,
+        )
+
     # The quoted total and "they said they're leaving" are the waiter's
     # observations, so they travel in config where the cashier's model cannot
     # rewrite them — see the note above CASHIER_TOOLS.

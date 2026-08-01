@@ -1328,6 +1328,10 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
     - Val is handed only the tools Sam authorised for that one job. Asked merely to take payment, Val
       also called `send_them_home`; the domain refused it, but the delegation then reported failure for
       a charge that *had* gone through, and Sam told the customer their payment had not worked.
+    **The sub-agent models are per-graph, not per-process.** Held in a module global they were shared by
+    every graph in the process, so building a second one — the CLI beside the web app, or simply the
+    next test — silently rebound the first one's Mo and Val. They travel in `config` like `session` and
+    `visit_id`, for exactly the reason `agent/tools.py` gives at the top of the file.
     **What the split actually buys**, beyond the roles: a sub-agent's schemas never enter Sam's prompt,
     which is what makes `change_modifiers` affordable — it would not earn its schema tokens on every
     inference, but costs nothing in Mo's toolbox. Steps are kept in graph state rather than in the
@@ -1349,6 +1353,16 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
       with no way out. `run_turn` now closes the visit itself when the `go_home` event did not, and the
       event text names the exact call. Leaving is still the customer's decision (decision 3); they made
       it by pressing the button. An unpaid order is abandoned, which is what walking out means.
+    - *A sub-agent that repeats itself is looping, not working.* Mo called `add_to_cart` twice and put
+      the drink in the cart twice; Val charged twice, the second failing with `empty_cart` because the
+      first had emptied it, and then narrated *that* — telling a customer their order was empty
+      immediately after they paid for it. A verbatim repeat of a call is refused, keyed on
+      (tool, arguments) rather than on the tool name so a genuinely multi-part request still works.
+      The cashier's delegation also ends the moment everything the waiter authorised has succeeded.
+    - *A delegation that authorises nothing is a wasted inference.* Val is only handed the tools the
+      waiter authorised, so a `ring_up` with neither a quoted total nor `going_home` hands over no
+      authority at all: Val can read the cart, say something, and change nothing. Refused at the tool
+      boundary instead.
     - *One `ok` cannot carry the money path.* "Any failed step fails the delegation" mislabels a
       successful charge; "any success succeeds it" would announce an order nobody paid for. `ring_up`
       reports `charged` and `visit_ended` as facts, and Sam's rule keys on `charged`.

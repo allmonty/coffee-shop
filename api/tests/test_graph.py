@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy import select
 
 from agent.graph import build_graph, route_after_barista
-from shop.models import MenuItem, VisitMenuItem
+from shop.models import MenuItem, Visit, VisitMenuItem
 from shop.seed import seed_catalog
 from shop.service import enter
 from tests.fakes import FakeToolCallingModel, says, tool_call, tool_calls
@@ -233,16 +233,20 @@ async def test_the_cashier_cannot_close_out_uninvited(shop):
 
     result = await run(
         [
-            tool_call("ring_up", request="are they going?", going_home=False),
-            says("Off already?"),
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            tool_call("ring_up", request="just paying", quoted_total_cents=520),
+            says("There you go."),
         ],
-        cashier=[tool_call("send_them_home"), says("Not yet, then.")],
+        # Sam authorised a charge and nothing else, so send_them_home is not
+        # even bound — Val reaching for it gets the unknown-tool envelope.
+        cashier=[tool_call("send_them_home"), tool_call("charge_the_customer"), says("Done.")],
     )
 
     last = [m for m in result["messages"] if isinstance(m, ToolMessage)][-1]
     steps = result["delegation_steps"][last.tool_call_id]
     assert steps[0]["error"] == "unknown_tool"
     assert result["visit_ended"] is False
+    assert result["wallet_cents"] == 1480
 
 
 async def test_a_charge_that_worked_is_not_reported_as_a_failure(shop):
@@ -846,3 +850,77 @@ async def test_a_sub_agent_can_still_make_several_different_calls(shop):
 
     assert len(result["cart"]["lines"]) == 2
     assert result["cart"]["total_cents"] == 580 + 460
+
+
+async def test_two_graphs_do_not_share_each_others_sub_agents(shop):
+    """The sub-agent models are per-graph, not per-process.
+
+    Held in a module global they were shared by every graph in the process, so
+    building a second one — the CLI beside the web app, or simply the next test
+    — silently rebound the first one's Mo and Val. Same reasoning as session and
+    visit_id never being globals.
+    """
+    _, session, visit_id = shop
+
+    def graph_for(reply):
+        return build_graph(
+            llm=FakeToolCallingModel([tool_call("ask_barista", request="a latte"), says("ok")]),
+            barista_llm=FakeToolCallingModel([says(reply)]),
+        )
+
+    first, second = graph_for("Mo number one"), graph_for("Mo number two")
+    user_id = await session.scalar(select(Visit.user_id).where(Visit.id == visit_id))
+    config = {
+        "configurable": {
+            "session": session,
+            "visit_id": str(visit_id),
+            "user_id": str(user_id),
+        }
+    }
+
+    # Run the FIRST graph after the second was built. With a global, the second
+    # build had already overwritten the first's barista.
+    result = await first.ainvoke({"messages": [HumanMessage(content="hi")]}, config=config)
+
+    envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][-1].content)
+    assert envelope["message"] == "Mo number one"
+    assert second is not first
+
+
+async def test_a_ring_up_that_authorises_nothing_is_refused(shop):
+    """Seen against the real model: Sam called ring_up with neither a quoted
+    total nor going_home, so Val was handed no action tools at all. The
+    delegation came back with zero steps — nobody charged, nobody sent home,
+    and Sam with nothing to act on.
+
+    Refused at the boundary rather than spending an inference finding out.
+    """
+    run, _, _ = shop
+
+    result = await run(
+        [tool_call("ring_up", request="they're done I think"), says("Sorry, what's that?")],
+        cashier=[says("Val should never have been asked.")],
+    )
+
+    envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][0].content)
+    assert envelope["ok"] is False
+    assert envelope["error"] == "nothing_to_do"
+    assert envelope["charged"] is False
+    # steps never travel in the envelope — they go to state (§13.11).
+    assert result["delegation_steps"] == {}
+    assert result["visit_ended"] is False
+
+
+async def test_going_home_without_a_total_is_still_allowed(shop):
+    """Walking out without paying is a thing customers do, so only the case
+    where BOTH are missing is refused."""
+    run, _, _ = shop
+
+    result = await run(
+        [tool_call("ring_up", request="off they go", going_home=True), says("Night!")],
+        cashier=[tool_call("send_them_home"), says("Closed out.")],
+    )
+
+    envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][0].content)
+    assert envelope["visit_ended"] is True
+    assert envelope["charged"] is False

@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
-from agent.delegates import WAITER_TOOLS, set_models
+from agent.delegates import WAITER_TOOLS
 from agent.dispatch import execute_tool_call
 from agent.instrumentation import (
     loop_iterations,
@@ -117,7 +117,24 @@ async def refresh(state: BaristaState, config: RunnableConfig) -> dict[str, Any]
         }
 
 
-async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
+def make_run_tools(models: dict[str, Any]):
+    """The tools node, closed over the sub-agent models for THIS graph.
+
+    `models` is threaded into `config` rather than kept in a module global, for
+    the same reason session and visit_id are (see agent/tools.py): a global is
+    shared by every graph in the process, so a second one — the CLI alongside
+    the web app, or two tests — silently rebinds the first one's sub-agents.
+    """
+
+    async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
+        return await _run_tools(state, config, models)
+
+    return run_tools
+
+
+async def _run_tools(
+    state: BaristaState, config: RunnableConfig, models: dict[str, Any]
+) -> dict[str, Any]:
     """Execute this turn's tool calls **one at a time, in order**.
 
     Hand-written rather than LangGraph's prebuilt `ToolNode` because that one runs
@@ -147,7 +164,11 @@ async def run_tools(state: BaristaState, config: RunnableConfig) -> dict[str, An
     # and visit_id do rather than through a closure.
     config = {
         **(config or {}),
-        "configurable": {**((config or {}).get("configurable") or {}), "agent_state": dict(state)},
+        "configurable": {
+            **((config or {}).get("configurable") or {}),
+            "agent_state": dict(state),
+            "models": models,
+        },
     }
 
     steps: dict[str, list] = {}
@@ -200,13 +221,13 @@ def build_graph(llm=None, checkpointer=None, barista_llm=None, cashier_llm=None)
     so a delegation is as deterministic as any other tool call.
     """
     waiter = llm or build_llm()
-    set_models(barista=barista_llm or waiter, cashier=cashier_llm or waiter)
+    models = {"barista": barista_llm or waiter, "cashier": cashier_llm or waiter}
 
     graph = StateGraph(BaristaState)
 
     graph.add_node("load_context", load_context)
     graph.add_node("barista", make_barista(waiter))
-    graph.add_node("tools", run_tools)
+    graph.add_node("tools", make_run_tools(models))
     graph.add_node("refresh", refresh)
     graph.add_node("finish", finish)
 

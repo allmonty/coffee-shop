@@ -382,14 +382,20 @@ async def change_modifiers(
     item_name: str,
     to_modifiers: list[str] | None = None,
     size: str | None = None,
+    from_modifiers: list[str] | None = None,
 ) -> Result:
     """Re-do a drink already in the order with different extras, repricing it.
 
     The modifier twin of `change_size`, and it exists for the same reason: one
     step in the trace instead of a remove-then-re-add whose middle state is a
-    cart the customer never asked for. Passing an empty list means "make it
-    plain" — unlike `remove_from_cart`, where the caller is choosing between
-    lines rather than describing the result.
+    cart the customer never asked for.
+
+    `to_modifiers` describes the RESULT, so an empty list means "make it plain"
+    — unlike `remove_from_cart`, where an empty list means "I have nothing to
+    say about extras". `from_modifiers` picks WHICH line to change, and is the
+    twin of `change_size`'s `from_size`: without it, a cart holding the same
+    drink twice at one size can only answer `modifier_ambiguous`, which also
+    made the merge below unreachable.
     """
     if await open_visit(session, visit_id) is None:
         return _visit_closed()
@@ -432,6 +438,9 @@ async def change_modifiers(
             )
         )
     ).all()
+    if from_modifiers is not None:
+        from_key = canonical_key(from_modifiers, deltas.modifiers)
+        candidates = [line for line in candidates if line.modifiers == from_key]
     if not candidates:
         return Result.failure("not_in_cart", f"There's no {item.name} in the order.")
     if len(candidates) > 1:

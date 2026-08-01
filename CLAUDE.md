@@ -116,6 +116,10 @@ These are the rules most easily broken by a well-intentioned change. Each is arg
 - **Every caller of the graph supplies the checkpointer.** `main.py`'s lifespan opens it and hands it
   to `routers/chat.py` via `set_checkpointer()`; the CLI opens its own. Compiling the graph without one
   does not fail — it silently makes the agent amnesiac, because each turn starts from empty state.
+- **Every loop has a cap, and the cap does not ask permission.** Sub-agents get `MAX_LAPS`, the waiter
+  gets `MAX_TURN_LAPS` plus a hard edge out of `refresh`. A model that will not converge is exactly the
+  one that ignores a "please stop" envelope. Cap by answering the outstanding tool calls, never by
+  skipping them: an `AIMessage` with unanswered `tool_calls` is an invalid history next turn.
 - **The Go Home button must end the visit, whatever the model does.** It is a deterministic control,
   not a sentence to interpret; `run_turn` closes the visit itself if the turn did not. Adding a
   delegation in front of `end_visit` broke it once already.

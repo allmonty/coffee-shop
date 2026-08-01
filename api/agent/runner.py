@@ -64,7 +64,11 @@ async def run_turn(
             "visit_id": str(visit_id),
             "user_id": str(user_id),
             "thread_id": str(visit_id),
-        }
+        },
+        # Belt to run_tools' braces. The cap there ends a runaway turn tidily;
+        # this stops a wiring mistake from ever running away silently, and it is
+        # set explicitly so the number is ours rather than LangGraph's default.
+        "recursion_limit": 30,
     }
 
     final_state: dict[str, Any] = {}
@@ -117,6 +121,12 @@ async def run_turn(
                     yield frame
                 async for frame in _domain_frames(payload):
                     yield frame
+
+    if final_state.get("turn_exhausted"):
+        # The turn was cut short, so there is no closing reply to stream. Say so
+        # rather than ending on silence; the UI already has a line for this.
+        logger.warning("turn.exhausted", extra={"visit_id": str(visit_id)})
+        yield {"type": "error", "error": "too_many_steps"}
 
     ended = bool(final_state.get("visit_ended"))
 

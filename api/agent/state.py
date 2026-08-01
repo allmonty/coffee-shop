@@ -50,4 +50,8 @@ class BaristaState(TypedDict, total=False):
     # barista→tools laps in the current turn; recorded as a histogram at finish.
     loop_count: int
 
+    # Set when the turn hit its lap cap, so the graph can leave by the short
+    # edge instead of asking a model that is not converging to converge.
+    turn_exhausted: bool
+
     visit_ended: bool

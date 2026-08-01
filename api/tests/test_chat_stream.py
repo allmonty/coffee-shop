@@ -530,3 +530,22 @@ async def test_go_home_does_not_double_end_when_the_cashier_already_did(
     # One press, one day. Two close-outs would land them on day 3.
     again = (await client.post("/api/enter", json={"name": "Allan"})).json()
     assert again["day"] == 2
+
+
+async def test_a_runaway_turn_reaches_the_browser_as_an_error_not_a_crash(
+    client, session_factory, scripted
+):
+    """It used to run to LangGraph's recursion limit and raise: twenty-five
+    local inferences, several minutes, and only then an agent_failed frame."""
+    entered = await _enter(client, session_factory)
+    scripted([tool_call("get_cart") for _ in range(12)] + [says("Sorry.")])
+
+    response = await client.post(
+        "/api/chat", json={"visit_id": entered["visit_id"], "message": "hello?"}
+    )
+
+    events = frames(response.text)
+    assert {"type": "error", "error": "too_many_steps"} in events
+    assert not any(f.get("error") == "agent_failed" for f in events)
+    # And it still closes the turn properly rather than dying mid-stream.
+    assert events[-1]["type"] == "done"

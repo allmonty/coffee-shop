@@ -11,7 +11,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy import select
 
-from agent.graph import build_graph, route_after_barista
+from agent.graph import MAX_TURN_LAPS, build_graph, route_after_barista
 from shop.models import MenuItem, Visit, VisitMenuItem
 from shop.seed import seed_catalog
 from shop.service import enter
@@ -924,3 +924,37 @@ async def test_going_home_without_a_total_is_still_allowed(shop):
     envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][0].content)
     assert envelope["visit_ended"] is True
     assert envelope["charged"] is False
+
+
+async def test_a_turn_that_will_not_converge_is_stopped(shop):
+    """Sam had no lap cap at all.
+
+    A turn that kept calling tools ran to LangGraph's default recursion limit of
+    25 and then RAISED — twenty-five local inferences, several minutes, and an
+    "I lost my train of thought" instead of an answer. Found by the scenario
+    suite; no scripted test had ever emitted a non-converging turn.
+    """
+    run, _, _ = shop
+
+    result = await run([tool_call("get_cart") for _ in range(12)] + [says("Right, sorry.")])
+
+    # The scripted model ignores the envelope and keeps calling tools, which is
+    # exactly what a model that will not converge does — so the hard edge is
+    # what has to stop it.
+    assert result["turn_exhausted"] is True
+    assert result["loop_count"] <= MAX_TURN_LAPS + 1, result["loop_count"]
+
+
+async def test_the_cap_still_answers_every_outstanding_tool_call(shop):
+    """An AIMessage carrying tool_calls with no matching ToolMessage is an
+    invalid history — the NEXT turn's request would be rejected before the model
+    ever saw it. So the cap answers the calls rather than skipping them."""
+    run, _, _ = shop
+
+    result = await run(
+        [tool_calls(("get_cart", {}), ("get_wallet_balance", {}))] * 10 + [says("Sorry.")]
+    )
+
+    asked = sum(len(m.tool_calls) for m in result["messages"] if isinstance(m, AIMessage))
+    answered = len([m for m in result["messages"] if isinstance(m, ToolMessage)])
+    assert asked == answered, "every tool call must have a result"

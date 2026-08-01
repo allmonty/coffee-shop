@@ -34,6 +34,15 @@ from shop import service
 from shop.pricing import load_deltas
 from shop.profile import customer_profile
 
+# The waiter's own lap cap. Sub-agents have had one since they existed
+# (delegates.MAX_LAPS); Sam had none, so a turn that would not converge ran to
+# LangGraph's default recursion limit of 25 and then RAISED — twenty-five local
+# inferences, several minutes, and an "I lost my train of thought" at the end
+# instead of an answer. Found by the scenario suite, not by a scripted test.
+#
+# Two is normal for an order and four for a delegation, so six is generous.
+MAX_TURN_LAPS = 6
+
 
 async def load_context(state: BaristaState, config: RunnableConfig) -> dict[str, Any]:
     """Fetch profile, menu, wallet and cart — once per visit.
@@ -172,10 +181,30 @@ async def _run_tools(
     }
 
     steps: dict[str, list] = {}
+    # Capped HERE rather than by routing straight to `finish`, because every
+    # tool call still has to be answered: an AIMessage carrying tool_calls with
+    # no matching ToolMessage is an invalid history, and the next turn's request
+    # would be rejected by the API before the model ever saw it.
+    # Two caps, because a polite one is not enough. The envelope below asks the
+    # model to stop, which a well-behaved one does; the hard edge out of
+    # `refresh` stops the turn whether it complies or not, because a model that
+    # will not converge is exactly the one that ignores being asked.
+    exhausted = state.get("loop_count", 0) > MAX_TURN_LAPS
 
     with node_span("tools"):
         for call in last.tool_calls:
-            payload = await execute_tool_call(call, registry, config)
+            if exhausted:
+                payload = {
+                    "ok": False,
+                    "error": "too_many_steps",
+                    "message": (
+                        "You have gone round several times without finishing. Stop "
+                        "calling tools now and tell the customer what you have done "
+                        "and what you need from them."
+                    ),
+                }
+            else:
+                payload = await execute_tool_call(call, registry, config)
             # A delegation's own tool calls go to state, not into the message.
             # The ToolMessage's content IS the waiter's context, and a sub-agent
             # that read the menu and added a drink would otherwise re-enter that
@@ -192,7 +221,12 @@ async def _run_tools(
                 )
             )
 
-    return {"messages": results, "delegation_steps": steps}
+    return {"messages": results, "delegation_steps": steps, "turn_exhausted": exhausted}
+
+
+def route_after_tools(state: BaristaState) -> str:
+    """Normally back to the model; to `finish` once the turn is spent."""
+    return "finish" if state.get("turn_exhausted") else "barista"
 
 
 def route_after_barista(state: BaristaState) -> str:
@@ -241,7 +275,11 @@ def build_graph(llm=None, checkpointer=None, barista_llm=None, cashier_llm=None)
     # Tools may have changed the cart or the wallet, so refresh before the model
     # sees the result — otherwise it reads a stale total out loud.
     graph.add_edge("tools", "refresh")
-    graph.add_edge("refresh", "barista")
+    graph.add_conditional_edges(
+        "refresh",
+        route_after_tools,
+        {"barista": "barista", "finish": "finish"},
+    )
     graph.add_edge("finish", END)
 
     return graph.compile(checkpointer=checkpointer)

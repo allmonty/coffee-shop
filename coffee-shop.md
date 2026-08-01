@@ -1353,6 +1353,15 @@ Resolved, with the reasoning kept so a future change is a decision rather than a
       with no way out. `run_turn` now closes the visit itself when the `go_home` event did not, and the
       event text names the exact call. Leaving is still the customer's decision (decision 3); they made
       it by pressing the button. An unpaid order is abandoned, which is what walking out means.
+    - *The waiter had no lap cap at all.* Sub-agents have had one since they existed; Sam ran to
+      LangGraph's default recursion limit of 25 and then **raised** — twenty-five local inferences,
+      several minutes, and "I lost my train of thought" instead of an answer. Two caps now, because a
+      polite one is not enough: `run_tools` answers every outstanding call with a "stop and talk to the
+      customer" envelope, and a hard edge out of `refresh` ends the turn whether the model complies or
+      not, since a model that will not converge is exactly the one that ignores being asked. The calls
+      are still answered rather than skipped — an `AIMessage` carrying `tool_calls` with no matching
+      `ToolMessage` is an invalid history, and the *next* turn's request would be rejected before the
+      model ever saw it. Found by the scenario suite; no scripted test had emitted a non-converging turn.
     - *A sub-agent that repeats itself is looping, not working.* Mo called `add_to_cart` twice and put
       the drink in the cart twice; Val charged twice, the second failing with `empty_cart` because the
       first had emptied it, and then narrated *that* — telling a customer their order was empty

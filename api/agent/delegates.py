@@ -62,6 +62,7 @@ async def _run_subagent(
     request: str,
     tools: list,
     config: RunnableConfig,
+    finishes_when: set[str] | None = None,
 ) -> dict[str, Any]:
     """One delegation: a small tool loop that collapses to a single envelope.
 
@@ -80,6 +81,7 @@ async def _run_subagent(
     registry = {t.name: t for t in tools}
     messages: list[Any] = [SystemMessage(content=system), HumanMessage(content=request)]
     steps: list[dict[str, Any]] = []
+    attempted: set[tuple[str, str]] = set()
 
     delegations.add(1, {"to": role})
     with node_span(f"delegate.{role}") as span:
@@ -102,7 +104,29 @@ async def _run_subagent(
             # (§13.7): one shared AsyncSession, and calls that are causally
             # ordered.
             for call in reply.tool_calls:
-                payload = await execute_tool_call(call, registry, config, agent=role)
+                # A sub-agent repeating a call it has already made, verbatim, is
+                # looping — not working. Measured against the real model: Mo
+                # called add_to_cart twice and put the drink in the cart twice;
+                # Val charged twice, the second failing with empty_cart because
+                # the first had emptied it.
+                #
+                # Refusing the repeat rather than capping the laps keeps a
+                # genuinely multi-part job working — "a latte and a flat white,
+                # both oat" is two DIFFERENT add_to_cart calls and still runs.
+                fingerprint = (call["name"], json.dumps(call.get("args") or {}, sort_keys=True))
+                if fingerprint in attempted:
+                    payload = {
+                        "ok": False,
+                        "error": "already_done",
+                        "message": (
+                            f"You already called {call['name']} with exactly those "
+                            "arguments and it is done. Do not repeat it — say what "
+                            "you have done, or do the next different thing."
+                        ),
+                    }
+                else:
+                    attempted.add(fingerprint)
+                    payload = await execute_tool_call(call, registry, config, agent=role)
                 steps.append(
                     {
                         "tool": call["name"],
@@ -114,6 +138,22 @@ async def _run_subagent(
                         "steps": [],
                     }
                 )
+                if finishes_when and finishes_when <= {s["tool"] for s in steps if s["ok"]}:
+                    # Everything the waiter authorised has now succeeded, so
+                    # there is nothing left to decide. Left to run on, Val
+                    # called charge_the_customer a second time, hit empty_cart
+                    # because the first call had emptied it, and then narrated
+                    # THAT — telling a customer their order was empty
+                    # immediately after they paid for it.
+                    #
+                    # The reply is the successful action's own message rather
+                    # than the model's summary of it: domain messages are
+                    # already written to be read aloud (§6.4), and one fewer
+                    # lap is one fewer local inference.
+                    delegation_laps.record(lap, {"to": role})
+                    done = [s for s in steps if s["ok"] and s["tool"] in finishes_when]
+                    return _outcome(role, done[-1]["message"] or "", steps)
+
                 messages.append(
                     ToolMessage(
                         content=json.dumps(payload),
@@ -227,8 +267,13 @@ async def ring_up(
         role="cashier",
         system=cashier_prompt(_state(sub_config), quoted_total_cents, going_home),
         request=request,
-        # Scoped to what Sam actually authorised — see cashier_tools().
+        # Scoped to what Sam actually authorised — see cashier_tools() ...
         tools=cashier_tools(quoted_total_cents=quoted_total_cents, going_home=going_home),
+        # ... and finished the moment all of it has worked.
+        finishes_when={
+            *(["charge_the_customer"] if quoted_total_cents is not None else []),
+            *(["send_them_home"] if going_home else []),
+        },
         config=sub_config,
     )
 

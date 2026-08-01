@@ -9,9 +9,16 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from shop.models import MenuItem, VisitMenuItem
+from shop.models import Cart, MenuItem, VisitMenuItem
 from shop.seed import seed_catalog
-from shop.service import add_to_cart, change_size, enter, get_cart, remove_from_cart
+from shop.service import (
+    add_to_cart,
+    change_modifiers,
+    change_size,
+    enter,
+    get_cart,
+    remove_from_cart,
+)
 
 
 @pytest.fixture
@@ -443,3 +450,152 @@ async def test_change_size_asks_which_when_two_modifier_variants_exist(shop):
     result = await change_size(session, visit_id, "Latte", "small", "large")
 
     assert result.error == "modifier_ambiguous"
+
+
+# --- change_modifiers (spec §13.11) ----------------------------------------
+#
+# The modifier twin of change_size: one step in the trace instead of a
+# remove-then-re-add whose middle state is a cart the customer never asked for.
+
+
+async def test_change_modifiers_adds_an_extra_and_reprices(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk"])
+
+    assert result.ok is True
+    assert result.data["total_cents"] == 580
+    assert result.data["difference_cents"] == 60
+
+
+async def test_change_modifiers_can_make_a_drink_plain_again(shop):
+    """An empty list means "no extras", unlike remove_from_cart where it means
+    "nothing to say about extras"."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+
+    result = await change_modifiers(session, visit_id, "Latte", [])
+
+    assert result.data["lines"][0]["modifiers"] == []
+    assert result.data["total_cents"] == 520
+    assert result.data["difference_cents"] == -60
+
+
+async def test_change_modifiers_keeps_the_quantity(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 3, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["extra_shot"])
+
+    assert result.data["lines"][0]["quantity"] == 3
+    assert result.data["total_cents"] == 3 * 620
+
+
+async def test_change_modifiers_merges_into_an_identical_line(shop):
+    """Otherwise the unique index would reject the update."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["oat_milk"])
+    await add_to_cart(session, visit_id, "Latte", 2, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk"], from_modifiers=[])
+
+    assert len(result.data["lines"]) == 1
+    assert result.data["lines"][0]["quantity"] == 3
+
+
+async def test_change_modifiers_rejects_an_unknown_code(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["soy_milk"])
+
+    assert result.error == "unknown_modifier"
+    assert result.message.endswith("?")
+
+
+async def test_change_modifiers_rejects_two_milks(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk", "almond_milk"])
+
+    assert result.error == "modifier_conflict"
+
+
+async def test_change_modifiers_on_food_is_rejected(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Croissant", 1)
+
+    result = await change_modifiers(session, visit_id, "Croissant", ["oat_milk"])
+
+    assert result.error == "modifier_not_applicable"
+
+
+async def test_change_modifiers_on_something_not_ordered(shop):
+    session, visit_id = shop
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk"])
+
+    assert result.error == "not_in_cart"
+
+
+async def test_change_modifiers_asks_which_size_when_two_are_in_the_cart(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "small")
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk"])
+
+    assert result.error == "size_ambiguous"
+
+
+async def test_change_modifiers_picks_a_line_with_from_modifiers(shop):
+    """Without it, a cart holding the same drink twice at one size could only
+    answer modifier_ambiguous — which also left the merge branch unreachable."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["extra_shot"])
+
+    result = await change_modifiers(
+        session, visit_id, "Latte", ["oat_milk"], from_modifiers=["extra_shot"]
+    )
+
+    assert result.ok is True
+    mods = sorted(line["modifiers"] for line in result.data["lines"])
+    assert mods == [[], ["oat_milk"]]
+
+
+async def test_change_modifiers_asks_which_variant_when_two_share_a_size(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+    await add_to_cart(session, visit_id, "Latte", 1, "large", ["extra_shot"])
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk"])
+
+    assert result.error == "modifier_ambiguous"
+
+
+async def test_change_modifiers_takes_a_size_to_disambiguate(shop):
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "small")
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+
+    result = await change_modifiers(session, visit_id, "Latte", ["oat_milk"], size="large")
+
+    assert result.ok is True
+    large = [line for line in result.data["lines"] if line["size"] == "large"][0]
+    assert large["modifiers"] == ["oat_milk"]
+
+
+async def test_change_modifiers_bumps_the_cart_version(shop):
+    """A cart edit must invalidate a prior order's idempotency key."""
+    session, visit_id = shop
+    await add_to_cart(session, visit_id, "Latte", 1, "large")
+    before = (await get_cart(session, visit_id)).ok
+
+    await change_modifiers(session, visit_id, "Latte", ["oat_milk"])
+    after = await session.scalar(select(Cart.version).where(Cart.visit_id == visit_id))
+
+    assert before is True
+    assert after >= 3

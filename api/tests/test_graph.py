@@ -719,3 +719,130 @@ async def test_a_successful_charge_reports_charged(shop):
     envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][-1].content)
     assert envelope["charged"] is True
     assert envelope["visit_ended"] is False
+
+
+async def test_a_tool_that_raises_comes_back_as_an_envelope(shop):
+    """The invariant behind TOUR bug 2, which had no regression test at all.
+
+    A missing REQUIRED argument makes the tool itself raise, which is a
+    different path from the unknown-argument check above — that one never
+    reaches the tool. Small models drop required arguments constantly, and the
+    turn has to survive it.
+    """
+    run, _, _ = shop
+
+    result = await run(
+        [tool_call("add_to_cart", quantity=1, size="large"), says("Sorry — which drink?")]
+    )
+
+    envelope = json.loads([m for m in result["messages"] if isinstance(m, ToolMessage)][0].content)
+    assert envelope["ok"] is False
+    assert envelope["error"] == "invalid_arguments"
+    assert envelope["message"], "an envelope without a message leaves the model to invent one"
+    assert result["messages"][-1].content == "Sorry — which drink?"
+
+
+async def test_the_cashier_cannot_charge_when_nothing_was_quoted(shop):
+    """Val is normally not even given the tool, so this is the belt to that
+    braces — it must still refuse rather than charge some default."""
+    run, _, _ = shop
+    from agent.tools import charge_the_customer
+
+    result = await run(
+        [tool_call("ring_up", request="just leaving"), says("Right you are.")],
+        cashier=[says("Nothing to charge.")],
+    )
+    assert result["wallet_cents"] == 2000
+
+    session, visit_id = shop[1], shop[2]
+    payload = await charge_the_customer.ainvoke(
+        {}, {"configurable": {"session": session, "visit_id": str(visit_id)}}
+    )
+    assert payload["error"] == "nothing_quoted"
+    assert payload["message"]
+
+
+async def test_a_sub_agent_stops_once_the_job_is_done(shop):
+    """Val charged twice in one delegation: the first worked, the second hit
+    empty_cart because the first had emptied the cart — and Val then narrated
+    THAT, telling the customer their order was empty right after paying.
+
+    Once everything the waiter authorised has succeeded there is nothing left
+    to decide, so the delegation returns instead of taking another lap.
+    """
+    run, _, _ = shop
+
+    result = await run(
+        [
+            tool_call("add_to_cart", item_name="Latte", quantity=1, size="large"),
+            tool_call("ring_up", request="pay", quoted_total_cents=520),
+            says("Lovely."),
+        ],
+        cashier=[
+            tool_call("charge_the_customer"),
+            tool_call("charge_the_customer"),
+            says("Order was empty!"),
+        ],
+    )
+
+    last = [m for m in result["messages"] if isinstance(m, ToolMessage)][-1]
+    envelope = json.loads(last.content)
+    steps = result["delegation_steps"][last.tool_call_id]
+
+    assert len(steps) == 1, "the second charge should never have been attempted"
+    assert envelope["charged"] is True
+    assert "empty" not in (envelope["message"] or "").lower()
+    assert result["wallet_cents"] == 1480
+
+
+async def test_a_sub_agent_cannot_repeat_the_same_call(shop):
+    """Measured against the real model: Mo called add_to_cart twice and put the
+    drink in twice; Val charged twice and the second failed with empty_cart.
+
+    The guard refuses the repeat rather than capping laps, so a genuinely
+    multi-part job still works — see the next test.
+    """
+    run, _, _ = shop
+
+    result = await run(
+        [tool_call("ask_barista", request="a large latte with oat"), says("Done.")],
+        barista=[
+            tool_call(
+                "add_to_cart", item_name="Latte", quantity=1, size="large", modifiers=["oat_milk"]
+            ),
+            tool_call(
+                "add_to_cart", item_name="Latte", quantity=1, size="large", modifiers=["oat_milk"]
+            ),
+            says("In."),
+        ],
+    )
+
+    assert result["cart"]["lines"][0]["quantity"] == 1, "the drink went in twice"
+    last = [m for m in result["messages"] if isinstance(m, ToolMessage)][-1]
+    steps = result["delegation_steps"][last.tool_call_id]
+    assert [s["error"] for s in steps] == [None, "already_done"]
+
+
+async def test_a_sub_agent_can_still_make_several_different_calls(shop):
+    """The guard keys on the arguments, not the tool name, so two genuinely
+    different drinks are two calls and both run."""
+    run, _, _ = shop
+
+    result = await run(
+        [
+            tool_call("ask_barista", request="a large latte and a small one, both oat"),
+            says("Done."),
+        ],
+        barista=[
+            tool_call(
+                "add_to_cart", item_name="Latte", quantity=1, size="large", modifiers=["oat_milk"]
+            ),
+            tool_call(
+                "add_to_cart", item_name="Latte", quantity=1, size="small", modifiers=["oat_milk"]
+            ),
+            says("Both in."),
+        ],
+    )
+
+    assert len(result["cart"]["lines"]) == 2
+    assert result["cart"]["total_cents"] == 580 + 460

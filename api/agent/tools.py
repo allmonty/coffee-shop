@@ -149,16 +149,22 @@ async def change_modifiers(
     config: RunnableConfig,
     to_modifiers: list[str] | None = None,
     size: str | None = None,
+    from_modifiers: list[str] | None = None,
 ) -> dict:
     """Re-do a drink already in the order with different extras, repricing it.
 
     to_modifiers is the FULL set the drink should end up with, not a change to
     apply — pass an empty list to make it plain. Use these exact codes:
     "oat_milk", "almond_milk", "extra_shot". At most one milk.
+
+    from_modifiers picks which line to change, when the order holds the same
+    drink and size more than once. Omit it otherwise.
     """
     session, visit_id = _context(config)
     return (
-        await service.change_modifiers(session, visit_id, item_name, to_modifiers, size)
+        await service.change_modifiers(
+            session, visit_id, item_name, to_modifiers, size, from_modifiers
+        )
     ).to_dict()
 
 

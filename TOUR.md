@@ -496,6 +496,31 @@ handed only the tools Sam authorised for that one job.
 > the real model. Watch `agent.delegations` stay at zero. That is what a role
 > nothing can reach looks like.
 
+### Every loop has a cap, and the cap does not ask permission
+
+Sub-agents get three laps (`delegates.MAX_LAPS`). The waiter had **none** — it
+ran to LangGraph's default recursion limit of 25 and then *raised*: twenty-five
+local inferences, several minutes of a customer waiting, and "I lost my train of
+thought" instead of an answer.
+
+There are now two caps, and the second one is the point. `run_tools` answers
+every outstanding call with a "stop and talk to the customer" envelope, which a
+well-behaved model acts on — but the first version of this fix was *only* that,
+and a scripted test proved it insufficient in about a second: the model ignored
+the envelope and kept calling tools, which is exactly what a genuinely stuck
+model does. So a hard edge out of `refresh` ends the turn regardless of
+compliance.
+
+Note what the cap does **not** do: skip the calls. An `AIMessage` carrying
+`tool_calls` with no matching `ToolMessage` is an invalid history, so the *next*
+turn's request would be rejected by the API before the model ever saw it.
+
+The same lesson one level down: a sub-agent may not repeat a call it has already
+made verbatim. Mo called `add_to_cart` twice and put the drink in the cart twice;
+Val charged twice, the second failing with `empty_cart` because the first had
+emptied it. The guard keys on (tool, **arguments**), so "a latte and a flat
+white" is still two calls and both run.
+
 ### Two bugs a scripted test would never have found
 
 **LangChain silently drops an argument a tool does not declare**, and runs the
@@ -536,6 +561,8 @@ undo it.
 | Remove the `size` check constraint | `test_sized_food_line_is_rejected` | Make bad states unrepresentable |
 | Make `summarize` always return a note | `test_summarize_stores_nothing_when_nothing_stood_out` | Models invent when told to produce |
 | `set_checkpointer(None)` in `main.py`'s lifespan | `test_the_endpoint_remembers_the_previous_turn` | No store, no conversation |
+| Raise `MAX_TURN_LAPS` to 99 | `test_a_turn_that_will_not_converge_is_stopped` | An uncapped loop is a crash with extra steps |
+| Give the waiter's `add_to_cart` a `modifiers` argument | `test_the_waiter_cannot_add_extras_itself` — and against the real model, `agent.delegations` drops to zero | A role nothing can reach is decoration |
 
 The fourth one is the most instructive: a change that no test catches, but which
 doubles the cost of every turn. That's what the metrics are for.
@@ -605,6 +632,25 @@ diff around a small fix.
    *Lesson: the framework's forgiveness is your silent wrong answer. Validate
    the call against the schema you actually bound.*
 
+10. **A turn that would not converge ran to 25 laps and crashed.** Sub-agents
+    had a cap; the waiter had none, so LangGraph's default recursion limit ended
+    the turn with an exception after several minutes of inference. Found by the
+    scenario suite — the twelfth of twelve — because no scripted test had ever
+    emitted a turn that refuses to finish.
+    *Lesson: every loop needs a cap, and the cap cannot be a polite request. The
+    model that will not converge is precisely the one that ignores being asked
+    to stop.*
+
+11. **A sub-agent charged twice and narrated the failure.** Val called
+    `charge_the_customer`, it succeeded, then it called it again; the second hit
+    `empty_cart` because the first had emptied the cart. Val's closing line
+    described the second call, so the customer was told their order was empty
+    immediately after paying for it. Mo had the same fault and put the drink in
+    the cart twice.
+    *Lesson: a fluent sentence about a failure reads exactly like a fluent
+    sentence about a success. What happened has to come from the tool record,
+    never from the model's summary of it.*
+
 ---
 
 ## The same lessons, without the coffee
@@ -671,3 +717,14 @@ Still open, and the spec's §13 lists more:
   classifying its prose, which is exactly what the rest of the project refuses to
   ask an LLM for. That is the hard part, and it is why nobody has done it.
 - **The import-linter contract from Stop 1.** Still nothing but a paragraph.
+- **Sam's system prompt has doubled**, 2287 → 4608 characters, as each role and
+  guard rule earned its line. Not a latency problem — §6.6 has the measurements,
+  and a warm call re-prefills in 0.4s however long the prompt is. It is a
+  rule-following problem: every rule in there exists because a smaller one was
+  ignored, and the list is now long enough that the model skips items in it.
+  Trimming it means finding which rules the *code* could enforce instead, which
+  is how `modifiers`, the money tools and the lap caps all got fixed.
+- **`usual_order` still ignores extras**, so Sam cannot say "large oat latte,
+  like always?" — the one obvious payoff of §13.8 that is not wired up. It needs
+  a modal-modifier aggregate in `profile.py` beside `_favourite_size_per_item`,
+  and it changes the `/profile` payload the notes panel reads.

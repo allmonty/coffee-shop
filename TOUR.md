@@ -89,9 +89,10 @@ JSON directly, and small models handle `balance_cents` noticeably better than
 
 Skim the rest of `shop/` later. Read this one function properly.
 
-It returns seven different errors, and four of them are the interesting ones —
+It returns ten different errors, and six of them are the interesting ones —
 **each is a different truth the barista has to tell the customer** (the other
-three, `visit_closed`, `invalid_quantity` and `unknown_size`, are mechanical):
+four, `visit_closed`, `invalid_quantity`, `unknown_size` and
+`modifier_not_applicable`, are mechanical):
 
 | error | what it means |
 | --- | --- |
@@ -99,6 +100,8 @@ three, `visit_closed`, `invalid_quantity` and `unknown_size`, are mechanical):
 | `not_available_today` | "No mochas *today*." — real item, not drawn today |
 | `size_required` | "Which size?" — the request was incomplete, not wrong |
 | `size_not_applicable` | "A croissant only comes the one size." |
+| `unknown_modifier` | "We don't do soy — there's oat or almond." |
+| `modifier_conflict` | "Oat or almond, not both." |
 
 Collapsing these into a generic "rejected" would make the barista lie. "We don't
 sell mochas" is false when the shop sells mochas on other days.
@@ -106,6 +109,18 @@ sell mochas" is false when the shop sells mochas on other days.
 `size_required` is the interesting one. **It is not really a failure** — it's how
 the domain tells the agent the customer's request was incomplete, so the barista
 asks instead of guessing. Its message is a question, read aloud verbatim.
+
+Then read the **order** those checks run in, which is itself a decision: the whole
+size block fires before any modifier check, so "a latte with soy" comes back
+"which size?" rather than "we don't do soy". `size_required` is the only branch
+that asks a question, so it has to reach the barista first — otherwise the model
+fixes one problem, retries, and discovers the second. Two tests in `test_cart.py`
+lock that ordering from both directions.
+
+Note also what modifiers *don't* have: there is no `modifier_required`. A drink
+with no modifiers is a complete order, so a modifier request can only ever be
+over-specified, never under-specified — the exact mirror of size. That asymmetry
+is why the two axes need different error shapes despite looking alike.
 
 > **Try it:** `uv run pytest tests/test_cart.py -v` and read the test names as a
 > list. They're written to be a description of the behaviour.
@@ -228,13 +243,19 @@ sends each tool's name, signature and docstring to the model as its schema, so
 size: REQUIRED for drinks, and it must be what the customer actually said —
 ask them if they did not say one. Omit this argument entirely for food;
 passing it for a cookie or pastry is an error.
+
+modifiers: drinks only, and only if the customer asked for one. Use these
+exact codes: "oat_milk", "almond_milk", "extra_shot". At most one milk.
+Plain or regular milk is what the drink already comes with — send no
+modifier for it. Omit this argument entirely otherwise.
 ```
 
 — is not documentation for you. It is an instruction to the model, written in the
 place the model is guaranteed to read it, and it is the cheapest lever you have
-on tool-calling accuracy. Note what it does *not* do: it never says what a size
-costs. Prices stay in the domain, so the schema can't teach the model to invent
-one.
+on tool-calling accuracy. Note what it does *not* do: it names the sizes and the
+modifier codes, but never says what either **costs**. Prices stay in the domain,
+so the schema can't teach the model to invent one — the same reason no tool takes
+a price argument.
 
 Look at `_context()`. Session and `visit_id` arrive through LangGraph's
 `config["configurable"]`, injected by the caller — not globals, not closures.
@@ -439,6 +460,93 @@ ordering unambiguous and lets the cart update mid-sentence.
 
 ---
 
+## Stop 11 — Three roles, one voice (`api/agent/delegates.py`)
+
+Sam works the counter. Mo works the machine. Val works the till. Mo and Val are
+LLM sub-agents that Sam reaches through `ask_barista` and `ring_up` — **agents as
+tools**, not three peers passing control between them.
+
+That shape was chosen on cost. Peer handoff costs 3–5 local inferences per turn
+against today's 1–2, and Stop 6 is about a decision that deleted *one*. It also
+keeps every invariant in this document intact for free: a delegation returns the
+same `{ok, error, message}` envelope, so `run_tools`, the malformed-call path and
+the `tool.*` spans all work unchanged.
+
+**Read `_run_subagent`.** It is a small tool loop — the same shape as the main
+graph, capped at three laps — that collapses to one envelope.
+
+### The part that actually matters: every gate is structural
+
+The project's rule has always been "gate in code, not prose" (Stop 7). Adding a
+second model tested that rule three times, and prose lost every time:
+
+| What was tried | What the real model did |
+| --- | --- |
+| Telling Sam to send extras to Mo | Handled "a large espresso with oat milk" alone. Mo never ran once. |
+| Letting Val name the total it charges | Would read the cart, always match, and turn `confirmed_total_cents` into a rubber stamp. |
+| Giving Val every till tool | Asked only to take payment, it closed out the visit too. |
+
+So: Sam's `add_to_cart` has **no `modifiers` argument** — there are two shapes of
+that tool over the same service function, and only Mo gets the full one.
+`charge_the_customer` and `send_them_home` take **no arguments at all**; the
+quoted total arrives through `config`, the same path `session` does. And Val is
+handed only the tools Sam authorised for that one job.
+
+> **Experiment:** put `modifiers` back on the waiter's `add_to_cart` and talk to
+> the real model. Watch `agent.delegations` stay at zero. That is what a role
+> nothing can reach looks like.
+
+### Every loop has a cap, and the cap does not ask permission
+
+Sub-agents get three laps (`delegates.MAX_LAPS`). The waiter had **none** — it
+ran to LangGraph's default recursion limit of 25 and then *raised*: twenty-five
+local inferences, several minutes of a customer waiting, and "I lost my train of
+thought" instead of an answer.
+
+There are now two caps, and the second one is the point. `run_tools` answers
+every outstanding call with a "stop and talk to the customer" envelope, which a
+well-behaved model acts on — but the first version of this fix was *only* that,
+and a scripted test proved it insufficient in about a second: the model ignored
+the envelope and kept calling tools, which is exactly what a genuinely stuck
+model does. So a hard edge out of `refresh` ends the turn regardless of
+compliance.
+
+Note what the cap does **not** do: skip the calls. An `AIMessage` carrying
+`tool_calls` with no matching `ToolMessage` is an invalid history, so the *next*
+turn's request would be rejected by the API before the model ever saw it.
+
+The same lesson one level down: a sub-agent may not repeat a call it has already
+made verbatim. Mo called `add_to_cart` twice and put the drink in the cart twice;
+Val charged twice, the second failing with `empty_cart` because the first had
+emptied it. The guard keys on (tool, **arguments**), so "a latte and a flat
+white" is still two calls and both run.
+
+### Two bugs a scripted test would never have found
+
+**LangChain silently drops an argument a tool does not declare**, and runs the
+call without it — so Sam asking for oat milk with a tool that has no such
+argument produced a *plain* espresso, reported as a success. A silent wrong
+order is worse than either alternative. `dispatch.execute_tool_call` now rejects
+unknown arguments outright.
+
+**One `ok` cannot carry the money path.** "Any failed step fails the delegation"
+labelled a charge that had gone through as a failure, and Sam told the customer
+their payment had not worked. "Any success succeeds it" would announce an order
+nobody paid for. `ring_up` reports `charged` and `visit_ended` as separate facts,
+and Sam's rule keys on `charged`.
+
+### And one in the browser
+
+Models talk *and* call a tool in the same message. Both reach the SSE stream, so
+the customer read "Latte added." followed by "Sure thing! That's a large latte…".
+A prompt rule does not hold that at temperature 0 — the model narrates its own
+tool call regardless. The stream carries an explicit `reset_reply` frame instead:
+if tools ran, whatever was said beforehand was premature, so the UI drops it.
+
+> **Try it:** `uv run pytest tests/test_graph.py -k "cashier or barista" -v`
+
+---
+
 ## Experiments worth doing
 
 Each one breaks something on purpose. Run the named test, watch it fail,
@@ -453,6 +561,8 @@ undo it.
 | Remove the `size` check constraint | `test_sized_food_line_is_rejected` | Make bad states unrepresentable |
 | Make `summarize` always return a note | `test_summarize_stores_nothing_when_nothing_stood_out` | Models invent when told to produce |
 | `set_checkpointer(None)` in `main.py`'s lifespan | `test_the_endpoint_remembers_the_previous_turn` | No store, no conversation |
+| Raise `MAX_TURN_LAPS` to 99 | `test_a_turn_that_will_not_converge_is_stopped` | An uncapped loop is a crash with extra steps |
+| Give the waiter's `add_to_cart` a `modifiers` argument | `test_the_waiter_cannot_add_extras_itself` — and against the real model, `agent.delegations` drops to zero | A role nothing can reach is decoration |
 
 The fourth one is the most instructive: a change that no test catches, but which
 doubles the cost of every turn. That's what the metrics are for.
@@ -500,6 +610,47 @@ diff around a small fix.
    entry point the user actually uses, and remember that a missing checkpointer
    fails silently rather than loudly.*
 
+7. **A small model copied the prompt's own example.** The summarizer's few-shot
+   examples were realistic notes; `qwen2.5:3b` returned one verbatim, inventing
+   a mocha the customer never mentioned. `14b` did not, so it had been hiding
+   for the whole project.
+   *Lesson: a small model reads an example as content to reuse, not as a shape
+   to imitate — and the bigger model masks it. Run your prompts on a smaller
+   model on purpose.*
+
+8. **The decision panel replayed old turns.** `messages` is the whole
+   checkpointed thread, not the current turn's slice, so a per-turn "already
+   reported" set that starts empty re-emits every earlier turn's tool calls
+   under the current one.
+   *Lesson: with a checkpointer, "what happened this turn" is never just "what
+   is in state" — and a one-turn probe cannot show you the difference.*
+
+9. **A tool argument that vanished.** LangChain silently drops an argument the
+   tool does not declare and runs the call anyway, so a waiter asking for oat
+   milk with a tool that has no such argument produced a plain drink and
+   reported success.
+   *Lesson: the framework's forgiveness is your silent wrong answer. Validate
+   the call against the schema you actually bound.*
+
+10. **A turn that would not converge ran to 25 laps and crashed.** Sub-agents
+    had a cap; the waiter had none, so LangGraph's default recursion limit ended
+    the turn with an exception after several minutes of inference. Found by the
+    scenario suite — the twelfth of twelve — because no scripted test had ever
+    emitted a turn that refuses to finish.
+    *Lesson: every loop needs a cap, and the cap cannot be a polite request. The
+    model that will not converge is precisely the one that ignores being asked
+    to stop.*
+
+11. **A sub-agent charged twice and narrated the failure.** Val called
+    `charge_the_customer`, it succeeded, then it called it again; the second hit
+    `empty_cart` because the first had emptied the cart. Val's closing line
+    described the second call, so the customer was told their order was empty
+    immediately after paying for it. Mo had the same fault and put the drink in
+    the cart twice.
+    *Lesson: a fluent sentence about a failure reads exactly like a fluent
+    sentence about a success. What happened has to come from the tool record,
+    never from the model's summary of it.*
+
 ---
 
 ## The same lessons, without the coffee
@@ -523,6 +674,9 @@ different agent, this is the transferable part — the shop is only the example.
 | Facts from SQL, opinions from the model | `profile.py` vs `summarize.py` (Stop 8) | Never ask an LLM for something a `GROUP BY` can produce |
 | A trace shaped like the loop | `instrumentation.py` (Stop 9) | "Two inferences per turn" is invisible in logs |
 | A scripted model in the test suite | `tests/fakes.py` | Deterministic tests of the shapes real models produce |
+| Sub-agents as tools, not peers | `agent/delegates.py` (Stop 11) | A handoff you can't afford is a handoff you won't ship |
+| Role boundaries enforced by schema | Sam's `add_to_cart` (Stop 11) | Given the argument, the model will never delegate |
+| Authority injected, not argued | `charge_the_customer()` (Stop 11) | A second model must not be able to restate the first one's promise |
 
 The ordering is roughly the order to build them in. The first five are structure;
 the rest are the things you only learn by watching a small model behave badly.
@@ -533,13 +687,44 @@ the rest are the things you only learn by watching a small model behave badly.
 
 The spec's §13 lists what's still open. Good next exercises, hardest last:
 
-- **Add a modifier** (oat milk, extra shot). Touches the catalog, pricing, the
-  tool schema, the prompt, and the clarifying-question logic — a full lap of the
-  whole system.
-- **Show the notes in the UI.** Makes the memory layer visible; also a good
-  debugging surface.
-- **Use a smaller model for summarization.** Summarising is a different job from
-  conversation.
-- **Add a second agent** — a manager who restocks or changes prices. This is
-  where multi-agent orchestration starts, and the boundary in Stop 1 is what
-  makes it tractable.
+- ~~**Add a modifier** (oat milk, extra shot).~~ **Done** — see §3.6 and §13.8.
+  It was a full lap of the whole system, and the two bugs it surfaced are worth
+  reading: `change_size` merged an oat latte into a plain one at the plain price,
+  and picked between modifier variants with `session.scalar()`, which returns the
+  first row without complaining about the rest. Both were silent, and neither
+  would have failed a test written before modifiers existed.
+- ~~**Show the notes in the UI.**~~ **Done** — §13.9. Two panels: "What Sam
+  remembers" and "What Sam did". The second shows the *tool record*, not a
+  model-authored rationale, because `qwen2.5` is not a reasoning model and would
+  invent an explanation that could contradict the calls listed beside it.
+  The bug worth reading: `messages` is the whole checkpointed thread, so a
+  per-turn "already reported" set that starts empty replays every earlier turn's
+  calls under the current one. A one-turn probe cannot show it.
+- ~~**Use a smaller model for summarization.**~~ **Done** — §13.10, opt-in via
+  `OLLAMA_SUMMARY_MODEL`. The interesting part was not the speed. The prompt used
+  to illustrate its output with real-looking notes, and `3b` copied one verbatim,
+  inventing a mocha nobody ordered. **A small model reads a few-shot example as
+  content to reuse, not as a shape to imitate** — and a bigger model hides it, so
+  running your prompt on a smaller one on purpose is the cheap way to find it.
+- ~~**Add a second agent.**~~ **Done, three of them** — §13.11. See Stop 11.
+
+Still open, and the spec's §13 lists more:
+
+- **Wire the upsell backstops, or delete them.** `upsell_used`, `size_offers` and
+  `size_declines` are declared, carried forward and rendered — but nothing ever
+  writes them, so the rules are prompt-only and the metrics §13.2 cites as
+  verification do not exist. Deciding whether the model *made* an upsell means
+  classifying its prose, which is exactly what the rest of the project refuses to
+  ask an LLM for. That is the hard part, and it is why nobody has done it.
+- **The import-linter contract from Stop 1.** Still nothing but a paragraph.
+- **Sam's system prompt has doubled**, 2287 → 4608 characters, as each role and
+  guard rule earned its line. Not a latency problem — §6.6 has the measurements,
+  and a warm call re-prefills in 0.4s however long the prompt is. It is a
+  rule-following problem: every rule in there exists because a smaller one was
+  ignored, and the list is now long enough that the model skips items in it.
+  Trimming it means finding which rules the *code* could enforce instead, which
+  is how `modifiers`, the money tools and the lap caps all got fixed.
+- **`usual_order` still ignores extras**, so Sam cannot say "large oat latte,
+  like always?" — the one obvious payoff of §13.8 that is not wired up. It needs
+  a modal-modifier aggregate in `profile.py` beside `_favourite_size_per_item`,
+  and it changes the `/profile` payload the notes panel reads.

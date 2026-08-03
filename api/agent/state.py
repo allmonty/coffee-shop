@@ -28,6 +28,7 @@ class BaristaState(TypedDict, total=False):
     customer_profile: dict[str, Any] | None
     menu: list[dict[str, Any]]
     size_deltas: dict[str, int]
+    modifier_deltas: dict[str, int]
     wallet_cents: int
     cart: dict[str, Any]
     day: int
@@ -38,7 +39,19 @@ class BaristaState(TypedDict, total=False):
     size_offers: dict[str, bool]
     size_declines: int
 
+    # A delegation's own tool calls, keyed by the tool_call_id of the delegation
+    # that produced them. Kept HERE rather than inside the envelope on purpose:
+    # the envelope becomes the ToolMessage's content, so carrying steps in it
+    # would push every sub-agent's calls into the waiter's context on every
+    # later turn — undoing the context saving that justified agents-as-tools in
+    # the first place (spec §13.11). The SSE layer joins the two back together.
+    delegation_steps: dict[str, list]
+
     # barista→tools laps in the current turn; recorded as a histogram at finish.
     loop_count: int
+
+    # Set when the turn hit its lap cap, so the graph can leave by the short
+    # edge instead of asking a model that is not converging to converge.
+    turn_exhausted: bool
 
     visit_ended: bool

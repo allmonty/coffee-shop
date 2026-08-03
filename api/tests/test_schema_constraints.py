@@ -96,3 +96,125 @@ async def test_menu_item_cannot_be_a_sized_food(session):
     session.add(MenuItem(name="Odd Cookie", category="food", price_cents=200, sized=True))
     with pytest.raises((IntegrityError, DBAPIError)):
         await session.flush()
+
+
+async def test_modified_food_line_is_rejected(session):
+    """ "An oat milk cookie" is unrepresentable for the same reason a large one is.
+
+    Same `sized` flag, one axis over — no new machinery (spec §3.6).
+    """
+    cart = await _visit_with_cart(session)
+    cookie = await _add_item(session, name="Cookie", category="food", price_cents=200)
+
+    session.add(
+        CartLine(
+            cart_id=cart.id,
+            menu_item_id=cookie.id,
+            quantity=1,
+            size=None,
+            sized=False,
+            modifiers="oat_milk",
+        )
+    )
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await session.flush()
+
+
+async def test_modifiers_column_rejects_a_malformed_key(session):
+    """The column holds canonical codes, not free text."""
+    cart = await _visit_with_cart(session)
+    latte = await _add_item(session, name="Latte", category="drink", price_cents=400)
+
+    session.add(
+        CartLine(
+            cart_id=cart.id,
+            menu_item_id=latte.id,
+            quantity=1,
+            size="large",
+            sized=True,
+            modifiers="Oat Milk!",
+        )
+    )
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await session.flush()
+
+
+async def test_same_drink_with_different_modifiers_can_coexist(session):
+    """Line identity is (item, size, modifier set) — two cups, two lines."""
+    cart = await _visit_with_cart(session)
+    latte = await _add_item(session, name="Latte", category="drink", price_cents=400)
+
+    session.add_all(
+        [
+            CartLine(
+                cart_id=cart.id,
+                menu_item_id=latte.id,
+                quantity=1,
+                size="large",
+                sized=True,
+                modifiers="",
+            ),
+            CartLine(
+                cart_id=cart.id,
+                menu_item_id=latte.id,
+                quantity=1,
+                size="large",
+                sized=True,
+                modifiers="oat_milk",
+            ),
+        ]
+    )
+    await session.flush()
+
+    count = await session.scalar(
+        text("SELECT count(*) FROM cart_lines WHERE cart_id = :cart_id"), {"cart_id": cart.id}
+    )
+    assert count == 2
+
+
+async def test_duplicate_modifier_set_in_one_cart_is_rejected(session):
+    """The other half of merge-or-increment: the same cup is one row."""
+    cart = await _visit_with_cart(session)
+    latte = await _add_item(session, name="Latte", category="drink", price_cents=400)
+
+    session.add_all(
+        [
+            CartLine(
+                cart_id=cart.id,
+                menu_item_id=latte.id,
+                quantity=1,
+                size="large",
+                sized=True,
+                modifiers="oat_milk",
+            ),
+            CartLine(
+                cart_id=cart.id,
+                menu_item_id=latte.id,
+                quantity=1,
+                size="large",
+                sized=True,
+                modifiers="oat_milk",
+            ),
+        ]
+    )
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await session.flush()
+
+
+async def test_two_identical_food_lines_are_rejected(session):
+    """A hole the old constraint left open.
+
+    NULLs are distinct in a UNIQUE constraint, so `(cart, item, size)` never
+    bound food at all. The replacement indexes `coalesce(size, '')`.
+    """
+    cart = await _visit_with_cart(session)
+    cookie = await _add_item(session, name="Cookie", category="food", price_cents=200)
+
+    session.add_all(
+        [
+            CartLine(cart_id=cart.id, menu_item_id=cookie.id, quantity=1, size=None, sized=False),
+            CartLine(cart_id=cart.id, menu_item_id=cookie.id, quantity=1, size=None, sized=False),
+        ]
+    )
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await session.flush()

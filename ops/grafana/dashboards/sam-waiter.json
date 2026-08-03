@@ -1,0 +1,314 @@
+{
+  "uid": "sam-waiter",
+  "title": "Sam \u2014 front of house",
+  "tags": [
+    "coffee-shop",
+    "agent"
+  ],
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "visit",
+        "label": "Visit (one in-game day)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Turn latency (p50 / p95)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(agent_turn_duration_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_turn_duration_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Wall-clock for a whole customer turn, including any delegation.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Model calls per turn (p95) \u2014 Sam going in circles shows up here first",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_loop_iterations_bucket[5m])) by (le))",
+          "legendFormat": "laps p95",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "barista\u2192tools\u2192barista laps. Two is normal for an order. Sustained three or more means the model is not converging."
+    },
+    {
+      "type": "timeseries",
+      "title": "Delegations out, by role",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (to) (rate(agent_delegations_total[5m]))",
+          "legendFormat": "{{to}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Sam handing work to Mo or Val. A plain order should produce NONE \u2014 if 'a large latte, please' delegates, the split is wrong."
+    },
+    {
+      "type": "timeseries",
+      "title": "Sam's own tool calls, by outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool, ok) (rate(agent_tool_calls_total{agent=\"waiter\"}[5m]))",
+          "legendFormat": "{{tool}} ok={{ok}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Excludes anything Mo or Val did on Sam's behalf."
+    },
+    {
+      "type": "stat",
+      "title": "Off-menu requests (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (kind) (increase(agent_offmenu_request_total[1h]))",
+          "legendFormat": "{{kind}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "unknown_item = we never sell it. not_available_today = real item, not drawn today. Two different truths (\u00a73.3)."
+    },
+    {
+      "type": "stat",
+      "title": "Size clarifications (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(agent_size_clarifications_total[1h]))",
+          "legendFormat": "asked",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "size_required is not a failure \u2014 it is Sam noticing the request was incomplete and asking instead of guessing."
+    },
+    {
+      "type": "stat",
+      "title": "Malformed tool calls (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (increase(agent_tool_malformed_total[1h]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "invalid_arguments, unknown_tool, unparseable. The headline quality metric for a small local model."
+    },
+    {
+      "type": "stat",
+      "title": "Guard rejections (1h) \u2014 should sit at zero",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (guard) (increase(agent_guard_rejections_total[1h]))",
+          "legendFormat": "{{guard}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "total_mismatch means Sam quoted a figure the cart disagreed with. The domain refused the charge (\u00a76.4)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens in / out",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(llm_tokens_total{agent=\"waiter\"}[5m]))",
+          "legendFormat": "{{type}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Sam carries the menu and the whole conversation, so its prompt is the largest of the three."
+    },
+    {
+      "type": "logs",
+      "title": "Sam's events \u2014 filter by visit to read a whole day",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"coffee-shop-api\"} | scope_name = \"coffee_shop.agent\" | visit_id=~\"$visit\" | agent = \"waiter\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

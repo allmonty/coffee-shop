@@ -1,0 +1,220 @@
+{
+  "uid": "mo-barista",
+  "title": "Mo \u2014 the machine",
+  "tags": [
+    "coffee-shop",
+    "agent"
+  ],
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "visit",
+        "label": "Visit (one in-game day)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Delegations to Mo",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_delegations_total{to=\"barista\"}[5m]))",
+          "legendFormat": "ask_barista",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Mo only runs when a drink involves extras or wording Sam cannot map. Flat at zero while people order extras means the gate is broken."
+    },
+    {
+      "type": "timeseries",
+      "title": "Laps inside one delegation (p95 / max)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_delegation_laps_bucket{to=\"barista\"}[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "max(agent_delegation_laps_sum{to=\"barista\"}) / max(agent_delegation_laps_count{to=\"barista\"})",
+          "legendFormat": "mean",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Capped at 3. Sitting at the cap means Mo is looping and returning the 'in the weeds' envelope instead of an order."
+    },
+    {
+      "type": "timeseries",
+      "title": "Mo's tool calls, by outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool, ok) (rate(agent_tool_calls_total{agent=\"barista\"}[5m]))",
+          "legendFormat": "{{tool}} ok={{ok}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "add_to_cart with extras, change_modifiers, get_menu. Nothing else is bound to Mo."
+    },
+    {
+      "type": "timeseries",
+      "title": "Mo's tool latency (p95)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_tool_duration_milliseconds_bucket{agent=\"barista\"}[5m])) by (le, tool))",
+          "legendFormat": "{{tool}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Domain work only \u2014 this is Postgres time, not model time.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Model time and tokens",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(llm_request_duration_milliseconds_bucket{agent=\"barista\"}[5m])) by (le))",
+          "legendFormat": "latency p95 (ms)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(rate(llm_tokens_total{agent=\"barista\"}[5m]))",
+          "legendFormat": "tokens/s",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "description": "Mo's prompt is small \u2014 menu, extras vocabulary, current cart. It should be cheaper per call than Sam."
+    },
+    {
+      "type": "logs",
+      "title": "What Mo could not do \u2014 clarifications and rejected extras",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"coffee-shop-api\"} | scope_name = \"coffee_shop.agent\" | visit_id=~\"$visit\" | agent = \"barista\" | error != \"\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "queryType": "range"
+        }
+      ],
+      "description": "unknown_modifier and modifier_conflict are questions, not faults \u2014 Mo hands them back for Sam to ask.",
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

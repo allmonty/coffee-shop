@@ -67,6 +67,17 @@ size_clarifications = _meter.create_counter(
     "agent.size_clarifications",
     description="Drinks ordered without a size. Falls as the profile learns someone.",
 )
+delegations = _meter.create_counter(
+    "agent.delegations",
+    description="Times the waiter handed a job to a sub-agent. Label `to` is a "
+    "fixed set (barista|cashier) — never a model-written string (spec §13.11).",
+)
+delegation_laps = _meter.create_histogram(
+    "agent.delegation.laps",
+    description="Tool laps inside one delegation. Makes a runaway sub-agent "
+    "visible the way agent.loop.iterations makes a runaway waiter visible.",
+)
+
 llm_tokens = _meter.create_counter("llm.tokens", description="Prompt and completion tokens.")
 llm_duration = _meter.create_histogram("llm.request.duration", unit="ms")
 
@@ -103,6 +114,25 @@ def turn_span(visit_id: str, user_id: str, day: int | None = None):
 
 
 @contextmanager
+def summarize_span(user_id: str, model: str):
+    """The visit-summarization pass (spec §6.5.1).
+
+    Its own root span, not a child of the turn: it runs *after* the SSE stream
+    closes, by which point `agent.turn` is already ended. It is a separate agent
+    task on its own budget, and the trace should say so.
+
+    `model` is an attribute because the summarizer can run on a smaller model
+    than the barista (§13.10), and "did the small one actually run" is otherwise
+    unanswerable.
+    """
+    with tracer.start_as_current_span("agent.summarize_visit") as span:
+        span.set_attribute("gen_ai.request.model", model)
+        span.set_attribute("user.id", user_id)
+        logger.info("summarize.start", extra={"summary_model": model})
+        yield span
+
+
+@contextmanager
 def node_span(name: str):
     with tracer.start_as_current_span(f"graph.node.{name}") as span:
         logger.info("graph.node", extra={"node": name})
@@ -110,24 +140,34 @@ def node_span(name: str):
 
 
 @contextmanager
-def tool_span(name: str):
+def tool_span(name: str, agent: str = "waiter"):
     """A failed tool marks its own span, never the turn."""
     with tracer.start_as_current_span(f"tool.{name}") as span:
         span.set_attribute("tool.name", name)
+        span.set_attribute("agent.role", agent)
         yield span
 
 
-def record_tool_call(name: str, args: dict) -> None:
+def record_tool_call(name: str, args: dict, agent: str = "waiter") -> None:
     """Log the invocation before it runs, so a tool that hangs still leaves a trail.
 
     Note `tool_args`, not `args`: `extra` keys collide with the reserved
     attributes on `logging.LogRecord`, and `args` is one of them — logging
     raises rather than shadowing it.
     """
-    logger.info("tool.call", extra={"tool": name, "tool_args": _short(args)})
+    logger.info("tool.call", extra={"tool": name, "agent": agent, "tool_args": _short(args)})
 
 
-def record_tool_result(span, name: str, payload: dict) -> None:
+def record_tool_result(
+    span,
+    name: str,
+    payload: dict,
+    agent: str = "waiter",
+    duration_ms: float | None = None,
+) -> None:
+    """`agent` is one of waiter|barista|cashier — a fixed set, never a
+    model-written string, so it is safe as a metric label (§9.3). Without it
+    there is no way to ask what Mo costs as against what Sam costs."""
     ok = bool(payload.get("ok"))
     error = payload.get("error")
 
@@ -144,10 +184,20 @@ def record_tool_result(span, name: str, payload: dict) -> None:
     logger.log(
         logging.WARNING if error else logging.INFO,
         "tool.result",
-        extra={"tool": name, "ok": ok, "error": error or "", "envelope": _short(payload)},
+        extra={
+            "tool": name,
+            "agent": agent,
+            "ok": ok,
+            "error": error or "",
+            "envelope": _short(payload),
+        },
     )
 
-    tool_calls.add(1, {"tool": name, "ok": str(ok).lower()})
+    tool_calls.add(1, {"tool": name, "ok": str(ok).lower(), "agent": agent})
+    if duration_ms is not None:
+        # Declared since phase 3 and never once recorded, so per-tool latency
+        # did not exist anywhere — the slowest thing in a turn was invisible.
+        tool_duration.record(duration_ms, {"tool": name, "agent": agent})
 
     if error in {"unknown_item", "not_available_today"}:
         offmenu_requests.add(1, {"kind": error})
@@ -157,7 +207,9 @@ def record_tool_result(span, name: str, payload: dict) -> None:
         size_clarifications.add(1)
 
 
-def record_llm_call(span, response, duration_ms: float | None = None) -> None:
+def record_llm_call(
+    span, response, duration_ms: float | None = None, agent: str = "waiter"
+) -> None:
     """OTel GenAI semantic conventions (spec §9.3).
 
     Still marked experimental upstream and they do shift between releases; pin
@@ -166,17 +218,18 @@ def record_llm_call(span, response, duration_ms: float | None = None) -> None:
     """
     usage = getattr(response, "usage_metadata", None) or {}
     span.set_attribute("gen_ai.system", "ollama")
+    span.set_attribute("agent.role", agent)
     span.set_attribute("gen_ai.operation.name", "chat")
 
     if duration_ms is not None:
-        llm_duration.record(duration_ms)
+        llm_duration.record(duration_ms, {"agent": agent})
         span.set_attribute("gen_ai.request.duration_ms", round(duration_ms))
 
     if usage:
         span.set_attribute("gen_ai.usage.input_tokens", usage.get("input_tokens", 0))
         span.set_attribute("gen_ai.usage.output_tokens", usage.get("output_tokens", 0))
-        llm_tokens.add(usage.get("input_tokens", 0), {"type": "input"})
-        llm_tokens.add(usage.get("output_tokens", 0), {"type": "output"})
+        llm_tokens.add(usage.get("input_tokens", 0), {"type": "input", "agent": agent})
+        llm_tokens.add(usage.get("output_tokens", 0), {"type": "output", "agent": agent})
 
     calls = getattr(response, "tool_calls", None) or []
     span.set_attribute("gen_ai.response.tool_calls", len(calls))
@@ -193,6 +246,7 @@ def record_llm_call(span, response, duration_ms: float | None = None) -> None:
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
             "tool_calls": len(calls),
+            "agent": agent,
             "duration_ms": round(duration_ms) if duration_ms is not None else 0,
         },
     )

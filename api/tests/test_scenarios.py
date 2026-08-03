@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from agent.graph import build_graph
 from agent.runner import run_turn
-from shop.models import MenuItem, User, VisitMenuItem
+from shop.models import MenuItem, Order, User, VisitMenuItem
 from shop.seed import seed_catalog
 from shop.service import enter, get_cart
 
@@ -134,3 +134,117 @@ async def test_a_completed_order_debits_exactly_once(shop):
     assert user.wallet_cents in (2000, 1600), (
         f"wallet ended at {user.wallet_cents}; expected untouched or exactly one latte"
     )
+
+
+# --- the crew (spec §13.11) -------------------------------------------------
+#
+# Every significant bug in the three-role split was found by talking to the real
+# model, not by a scripted test: Sam never delegating when it had a `modifiers`
+# argument of its own, LangChain silently dropping that argument, Mo adding a
+# drink twice, Val charging twice and narrating the failure. Scripted tests
+# cannot find those, because they only ever emit the shapes we imagined.
+#
+# So these assert the two things that must hold however the models behave: the
+# domain ends up right, and the roles stayed inside their authority.
+
+
+async def test_a_drink_with_an_extra_is_priced_with_the_surcharge(shop):
+    """Whoever routes it, the customer is charged for the oat milk."""
+    say, session, visit_id, _ = shop
+
+    await say("a large latte with oat milk please")
+
+    cart = (await get_cart(session, visit_id)).data
+    assert len(cart["lines"]) == 1
+    line = cart["lines"][0]
+    assert (line["item"], line["size"]) == ("Latte", "large")
+    assert line["modifiers"] == ["oat_milk"]
+    assert cart["total_cents"] == 580  # 400 base + 120 large + 60 oat
+
+
+async def test_plain_milk_is_not_an_extra(shop):
+    """ "with milk" is the drink as listed, so it must not become a modifier and
+    must not cost anything more (§3.6)."""
+    say, session, visit_id, _ = shop
+
+    await say("a large latte with milk please")
+
+    cart = (await get_cart(session, visit_id)).data
+    assert cart["lines"][0]["modifiers"] == []
+    assert cart["total_cents"] == 520
+
+
+async def test_a_drink_only_ever_goes_in_once(shop):
+    """Mo called add_to_cart twice for one request and put the drink in the cart
+    twice. The delegation now refuses a verbatim repeat."""
+    say, session, visit_id, _ = shop
+
+    await say("one large latte with an extra shot, please")
+
+    cart = (await get_cart(session, visit_id)).data
+    assert sum(line["quantity"] for line in cart["lines"]) == 1
+
+
+async def test_paying_debits_exactly_once(shop):
+    """Val charged twice in one delegation, the second failing with empty_cart —
+    and then narrated that, telling the customer their order was empty right
+    after they paid for it."""
+    say, session, visit_id, user_id = shop
+
+    await say("a large latte with oat milk")
+    await say("that's everything, I'll pay now")
+    await say("yes please, go ahead")
+
+    user = await session.get(User, user_id)
+    orders = (
+        (
+            await session.execute(
+                select(Order.total_cents)
+                .where(Order.visit_id == visit_id)
+                .order_by(Order.placed_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Asserted on `orders`, not on the cart. "yes please, go ahead" is ambiguous
+    # enough that the model sometimes reads it as a fresh order and adds a drink
+    # after paying — annoying, but not wrong, and not what this test is about.
+    # What must never happen is a partial or a double debit.
+    assert user.wallet_cents == 2000 - sum(orders), (user.wallet_cents, orders)
+    assert len(orders) <= 1, f"charged more than once: {orders}"
+    if orders:
+        assert orders[0] == 580, orders
+
+
+async def test_the_waiter_never_spends_money_itself(shop):
+    """The hard gate, end to end: Sam has no place_order and no end_visit, so
+    every debit in the whole conversation went through Val."""
+    say, session, visit_id, user_id = shop
+
+    await say("a large latte and a croissant")
+    await say("that's all, charge me")
+
+    user = await session.get(User, user_id)
+    # 520 + 350 = 870. Any other non-2000 figure means something charged a total
+    # nobody quoted.
+    assert user.wallet_cents in (2000, 1130), user.wallet_cents
+
+
+async def test_going_home_always_advances_the_day(shop):
+    """The Go Home button is a deterministic control, not a sentence to
+    interpret — it must work with an unpaid cart, which is where it broke."""
+    say, session, visit_id, user_id = shop
+    graph = build_graph()
+
+    await say("a large latte please")
+
+    async for _ in run_turn(
+        session=session, graph=graph, user_id=user_id, visit_id=visit_id, event="go_home"
+    ):
+        pass
+
+    user = await session.get(User, user_id)
+    assert user.current_day == 2
+    assert (await get_cart(session, visit_id)).error == "visit_closed"

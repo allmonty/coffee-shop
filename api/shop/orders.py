@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from settings import settings
 from shop.cart import cart_payload, open_visit
 from shop.models import Cart, CartLine, MenuItem, Order, OrderLine, User, Visit
-from shop.pricing import format_cents, load_size_deltas, unit_price_cents
+from shop.modifiers import parse_key
+from shop.pricing import format_cents, load_deltas, unit_price_cents
 from shop.result import Result
 
 
@@ -123,10 +124,10 @@ async def place_order(
 async def _snapshot_lines(session: AsyncSession, *, order_id: uuid.UUID, cart_id: int) -> None:
     """Copy cart lines onto the order at the price actually charged.
 
-    The snapshot includes the size surcharge, so editing the catalog or
-    `size_modifiers` later cannot rewrite history.
+    The snapshot includes the size and modifier surcharges, so editing the
+    catalog, `size_modifiers` or `drink_modifiers` later cannot rewrite history.
     """
-    deltas = await load_size_deltas(session)
+    deltas = await load_deltas(session)
     rows = (
         await session.execute(
             select(CartLine, MenuItem)
@@ -143,7 +144,8 @@ async def _snapshot_lines(session: AsyncSession, *, order_id: uuid.UUID, cart_id
                 quantity=line.quantity,
                 size=line.size,
                 sized=line.sized,
-                unit_price_cents=unit_price_cents(item, line.size, deltas),
+                modifiers=line.modifiers,
+                unit_price_cents=unit_price_cents(item, line.size, line.modifiers, deltas),
             )
         )
 
@@ -206,6 +208,7 @@ async def order_history(session: AsyncSession, user_id: uuid.UUID) -> list[dict[
                     {
                         "item": item.name,
                         "size": line.size,
+                        "modifiers": list(parse_key(line.modifiers)),
                         "quantity": line.quantity,
                         "unit_price_cents": line.unit_price_cents,
                     }

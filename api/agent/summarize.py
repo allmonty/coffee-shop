@@ -14,6 +14,13 @@ code behaves:
 2. **Runs after the response is closed.** The customer is already walking out.
 3. **A failure here must never fail the visit.** Memory is a nicety; going home
    is not.
+4. **No concrete few-shot examples in the prompt.** This one was learned the
+   expensive way. The prompt used to illustrate the output with real-looking
+   notes — `["found the mocha too sweet", ...]` — and `qwen2.5:3b` copied them
+   into its answer verbatim, inventing a mocha that appeared nowhere in the
+   transcript. Replacing every example with a `<note>` placeholder fixed it on
+   both models. A small model reads an example as content to reuse, not as a
+   shape to imitate, so the examples here show only the shape (spec §13.10).
 """
 
 from __future__ import annotations
@@ -24,7 +31,8 @@ import uuid
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agent.llm import build_llm
+from agent.instrumentation import summarize_span
+from agent.llm import build_summary_llm
 from shop.notes import append_customer_notes
 
 logger = logging.getLogger(__name__)
@@ -44,10 +52,16 @@ Do NOT record:
 If nothing stands out, return an empty list. That is a perfectly good answer and
 most conversations should produce it.
 
-Reply with ONLY a JSON array of strings. Examples:
+Every note MUST come from something THIS customer said in the conversation
+below. If they did not say it, do not write it.
+
+Write each note as a short third-person phrase, not as a quote: turn "I don't
+like X" into "does not like X".
+
+Reply with ONLY a JSON array of strings, in one of these shapes:
 []
-["mentioned starting a new job"]
-["found the mocha too sweet", "always comes in early"]
+["<note>"]
+["<note>", "<note>"]
 """
 
 
@@ -90,28 +104,33 @@ async def summarize_visit(session, user_id: uuid.UUID, messages, llm=None) -> li
     if not transcript.strip():
         return []
 
-    try:
-        model = llm or build_llm()
-        reply = await model.ainvoke(
-            [
-                SystemMessage(content=SUMMARIZE_PROMPT),
-                HumanMessage(content=transcript),
-            ]
-        )
-        notes = extract_notes(str(reply.content))
-    except Exception:
-        logger.warning("visit summarization failed; continuing", exc_info=True)
-        return []
+    model = llm or build_summary_llm()
 
-    if not notes:
-        return []
+    with summarize_span(str(user_id), getattr(model, "model_name", "unknown")) as span:
+        try:
+            reply = await model.ainvoke(
+                [
+                    SystemMessage(content=SUMMARIZE_PROMPT),
+                    HumanMessage(content=transcript),
+                ]
+            )
+            notes = extract_notes(str(reply.content))
+        except Exception:
+            logger.warning("visit summarization failed; continuing", exc_info=True)
+            return []
 
-    try:
-        # Through shop.service, never straight to the table — this is the one
-        # place model output reaches a domain table (spec §5.1).
-        await append_customer_notes(session, user_id, notes)
-    except Exception:
-        logger.warning("storing visit notes failed; continuing", exc_info=True)
-        return []
+        # "Nothing stood out" is a normal outcome, not a failure, so it is
+        # recorded rather than left looking like a silent no-op in the trace.
+        span.set_attribute("summarize.note_count", len(notes))
+        if not notes:
+            return []
 
-    return notes
+        try:
+            # Through shop.service, never straight to the table — this is the one
+            # place model output reaches a domain table (spec §5.1).
+            await append_customer_notes(session, user_id, notes)
+        except Exception:
+            logger.warning("storing visit notes failed; continuing", exc_info=True)
+            return []
+
+        return notes

@@ -82,8 +82,8 @@ uv run python scripts/check_tool_calling.py
 ## Tests
 
 ```bash
-make test                                     # 253 tests, no Ollama needed
-cd api && uv run pytest -m scenario           # 6 conversations with the real model
+make test                                     # 296 tests, no Ollama needed
+cd api && uv run pytest -m scenario           # 12 conversations with the real model
 ```
 
 The default suite runs with a scripted fake model, so it is fast and

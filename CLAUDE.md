@@ -12,13 +12,13 @@ reasoning recorded inline. Read the relevant section before changing behaviour.
 ## Commands
 
 ```bash
-make test          # 253 tests, needs only Postgres — no Ollama
+make test          # 296 tests, needs only Postgres — no Ollama
 make lint          # ruff check + format --check
 make up            # full stack: app :3000, api :8000, Grafana :3001
 
 cd api
 uv run pytest tests/test_graph.py -q          # one file
-uv run pytest -m scenario                     # 6 conversations with the real model
+uv run pytest -m scenario                     # 12 conversations with the real model
 uv run python scripts/check_tool_calling.py   # does the model tool-call at all?
 uv run python scripts/shop_cli.py --name Allan
 uv run alembic revision --autogenerate -m "..." && uv run alembic upgrade head

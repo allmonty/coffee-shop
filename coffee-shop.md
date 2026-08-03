@@ -623,16 +623,43 @@ flowchart TD
 
 ### 6.4 Tools
 
+Split across three roles since §13.11. The waiter is the only one the customer talks to; the barista and
+cashier are reached through `ask_barista` and `ring_up` and have their own, smaller toolboxes. A
+sub-agent's schemas never enter the waiter's prompt, which is what makes a tool like `change_modifiers`
+affordable at all.
+
+**Sam — the waiter**
+
 | Tool | Arguments | Returns / effect |
 | --- | --- | --- |
-| `get_menu` | `category?` | **Today's** menu with prices (§3.2). Rarely needed — it is already in the context block (§6.6). |
+| `get_menu` | — | **Today's** menu with prices (§3.2). Rarely needed — it is already in the context block (§6.6). |
 | `get_wallet_balance` | — | Remaining money for today. |
-| `add_to_cart` | `item_name`, `quantity`, `size?` | Adds a line. Errors `unknown_item` if it is not in the catalog at all, `not_available_today` if it exists but wasn't drawn today (§3.3) — two different errors so the barista can tell the customer the truth. Also `size_required` for a drink with no size, and `size_not_applicable` for a size on food (§3.4). |
-| `remove_from_cart` | `item_name`, `size?`, `quantity?` | Removes a line. `size` disambiguates when the cart holds the same drink in two sizes. |
-| `change_size` | `item_name`, `from_size`, `to_size` | Resizes an existing cart line and reprices it. The size-upsell path (§3.5) in one call, so it reads as one step in the trace instead of a remove-then-re-add. |
-| `get_cart` | — | Lines with sizes, line prices, and total. |
-| `place_order` | `confirmed_total_cents` | Charges the wallet, creates the order, empties the cart. Errors on insufficient funds, empty cart, or a total mismatch. |
-| `end_visit` | `confirmed` | Closes the visit, advances the day, resets the wallet. Errors unless confirmation is genuine. |
+| `get_cart` | — | Lines with sizes, extras, line prices, and total. |
+| `add_to_cart` | `item_name`, `quantity`, `size?` | Adds a line. Errors `unknown_item` if it is not in the catalog at all, `not_available_today` if it exists but wasn't drawn today (§3.3) — two different errors so the barista can tell the customer the truth. Also `size_required` for a drink with no size, and `size_not_applicable` for a size on food (§3.4). **No `modifiers` argument**: extras are Mo's, and that gate is a schema difference rather than a prompt rule (§13.11). |
+| `remove_from_cart` | `item_name`, `size?`, `quantity?`, `modifiers?` | Removes a line. `size` and `modifiers` disambiguate when the cart holds the same drink more than once; an empty `modifiers` list means "nothing to say about extras", **not** "the plain one". |
+| `change_size` | `item_name`, `from_size`, `to_size` | Resizes an existing cart line and reprices it. The size-upsell path (§3.5) in one call, so it reads as one step in the trace instead of a remove-then-re-add. Stays with Sam because its arguments are already canonical. |
+| `ask_barista` | `request` | Hands a drink order to Mo in the customer's own words. Returns Mo's envelope, and a question to read aloud when Mo cannot resolve the wording alone. |
+| `ring_up` | `request`, `quoted_total_cents?`, `going_home?` | The only route to money. Returns `charged` and `visit_ended` as facts alongside `ok` — one flag cannot carry the money path. Refused with `nothing_to_do` when neither a quoted total nor `going_home` is passed, since that authorises nothing and Val could only talk. |
+
+**Mo — the barista.** Owns drink language: turning what a customer said into catalog names and extras codes.
+
+| Tool | Arguments | Returns / effect |
+| --- | --- | --- |
+| `get_menu` | — | As above. |
+| `add_to_cart` | `item_name`, `quantity`, `size?`, `modifiers?` | The same service function as Sam's, with the extras argument. Adds `unknown_modifier`, `modifier_conflict` and `modifier_not_applicable` (§3.6). |
+| `change_modifiers` | `item_name`, `to_modifiers?`, `size?`, `from_modifiers?` | Re-does a drink already in the order with different extras, repricing it — the modifier twin of `change_size`. `to_modifiers` describes the **result**, so an empty list means "make it plain"; `from_modifiers` picks **which** line, and is the twin of `from_size`. Without it a cart holding the same drink twice at one size could only answer `modifier_ambiguous`. |
+
+**Val — the cashier.** Owns the end of the visit. Handed only the tools the waiter authorised for that one
+job: no quoted total, no way to charge; nobody leaving, no way to close out.
+
+| Tool | Arguments | Returns / effect |
+| --- | --- | --- |
+| `get_cart`, `get_wallet_balance` | — | For reasoning about a refusal — never for sourcing the total. |
+| `charge_the_customer` | **none** | Charges the wallet, creates the order, empties the cart. Errors on insufficient funds, empty cart, or a total mismatch. Takes no arguments: the figure is the one Sam quoted out loud, injected through `config`. |
+| `send_them_home` | **none** | Closes the visit, advances the day, resets the wallet. Same shape — whether the customer said they were leaving is Sam's observation, not Val's guess. |
+
+`place_order` and `end_visit` remain the domain functions underneath, in `shop/`, unchanged and still
+confirmation-gated (below). What changed is that **no agent calls them directly any more.**
 
 Design rules for tools:
 
@@ -727,6 +754,24 @@ This is the most instructive piece of memory work in the project: it is the diff
 with a transcript and an agent with memory.
 
 ### 6.6 System prompt outline
+
+**Measured, because the argument for this section is a performance one.** Using Ollama's own timing
+decomposition on a 1,342-token prompt (`qwen2.5:14b-instruct`, warm):
+
+| | prefill | generation |
+| --- | --- | --- |
+| first call after the model goes idle | 16.1s | 1.5s |
+| every call after that | 0.1–0.4s | ~1.5s |
+
+Two things follow, and the second contradicts an intuition worth writing down so nobody re-derives it.
+**Prompt size is not the per-turn cost** — llama.cpp matches the common prefix, so a warm call re-prefills
+only what changed. And **rebuilding the system message every turn does not defeat that cache**: the
+volatile parts (wallet, cart) sit at the end of the context block, so a turn that changes only the cart
+total still matches ~99% of the prefix and prefills in 0.4s. Restructuring the prompt to protect the
+cache would buy nothing.
+
+What *does* cost is the number of inferences per turn, which is exactly what §6.6 and §13.11 are about.
+Prompt length still matters, but for rule-following on a small model rather than for latency.
 
 **Character** — warm, brief, a little wry. Named Sam. Never breaks character, never mentions being an AI.
 

@@ -766,11 +766,12 @@ decomposition on a 1,342-token prompt (`qwen2.5:14b-instruct`, warm):
 Two things follow, and the second contradicts an intuition worth writing down so nobody re-derives it.
 **Prompt size is not the per-turn cost** — llama.cpp matches the common prefix, so a warm call re-prefills
 only what changed. And **rebuilding the system message every turn does not defeat that cache**: the
-volatile parts (wallet, cart) sit at the end of the context block, so a turn that changes only the cart
-total still matches ~99% of the prefix and prefills in 0.4s. Restructuring the prompt to protect the
+cart sits at the end of the context block, so a turn that changes only the cart total still matches ~99%
+of the prefix and prefills in 0.4s. (The wallet line sits just above the menu, so a charge re-prefills the
+menu too — once per order, not per turn.) Restructuring the prompt to protect the
 cache would buy nothing.
 
-What *does* cost is the number of inferences per turn, which is exactly what §6.6 and §13.11 are about.
+What *does* cost is the number of inferences per turn, which is exactly what this section and §13.11 are about.
 Prompt length still matters, but for rule-following on a small model rather than for latency.
 
 **Character** — warm, brief, a little wry. Named Sam. Never breaks character, never mentions being an AI.

@@ -277,7 +277,7 @@ async def ring_up(
 
     # The quoted total and "they said they're leaving" are the waiter's
     # observations, so they travel in config where the cashier's model cannot
-    # rewrite them — see the note above CASHIER_TOOLS.
+    # rewrite them — see the note above cashier_tools() in agent/tools.py.
     sub_config = {
         **(config or {}),
         "configurable": {
